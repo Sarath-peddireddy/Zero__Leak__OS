@@ -1,67 +1,77 @@
 # ZeroLeak OS 🛡️
 
-**Adversarial Multi-Agent Simulation for Enterprise Deal Desks.**
+**Symmetrical Adversarial Multi-Agent Engine for B2B Deal Desks.**
 
-### The Bleed (The Problem)
-Your junior Account Executives are bleeding 3% of your profit margin every time a veteran procurement buyer bluffs them on a Zoom call. They panic. They yield on RTO (Return to Origin) penalties. They give away 60-day payment terms for free. 
+### The Bloodbath (The Problem)
+Enterprise B2B negotiation is a zero-sum game plagued by human error and psychological pressure. 
+*   **The Margin Leakage:** Junior Sales Execs panic under pressure, yielding on SLAs and Payment Terms, silently bleeding 3% of corporate profit margins.
+*   **The Cost Inefficiency:** Junior Procurement Officers fail to leverage market conditions or competitor quotes, overpaying for multi-year vendor lock-ins.
 
-**That 30-second panic attack costs your logistics company ₹2 Crores a year.** 
+Both sides are leaving millions on the table because they only practice when real money is on the line. 
 
-You cannot train humans to handle extreme psychological pressure using PowerPoint. They have to feel the heat. 
+### The Engine (The Solution)
+ZeroLeak OS is a Neuro-Symbolic, Adversarial Self-Play Arena. We deploy two autonomous, data-driven AI agents against each other in a live Telegram environment: **SwiftRoute Logistics (Sales)** vs. **MegaMart (Procurement)**.
 
-### The Plug (The Solution)
-ZeroLeak OS is a Neuro-Symbolic, Multi-Agent training arena. We drop your junior Sales Reps into a live Telegram environment against an aggressive, autonomous AI Procurement Buyer. 
-
-*   If the rep panics and drops the price, the AI takes their fake money.
-*   The human VP of Sales watches live in the "War Room" and whispers strategic overrides to the rep mid-negotiation.
-*   Post-match, our asynchronous **Judge Agent** analyzes the transcript, extracts the margin-leakage mistakes, and compacts them into a self-pruning SQLite Memory Playbook for future matches.
+Both agents negotiate fiercely based on distinct SQLite databases (CPQ floors vs. Target Mandates). Meanwhile, human executives (VP of Sales & Head of Sourcing) sit in isolated "War Rooms," whispering strategic overrides to their respective AIs in real-time. Post-match, our Split-Persona Judge audits the transcript and sends tailored executive reports to both department heads.
 
 ---
 
-### System Architecture (The Arena)
+### Symmetrical Architecture (The Arena)
 
 ```mermaid
 graph TD
-    subgraph Boardroom ["The Boardroom (Telegram Group)"]
-        Procurement[MegaMart Procurement Agent] <-->|Negotiates| Sales[SwiftRoute Sales Agent]
+    subgraph ProcWarRoom ["Procurement War Room"]
+        HeadSourcing[Human Head of Sourcing] -.->|Tactical Whispers / Overrides| ProcAgent
+    end
+
+    subgraph Boardroom ["The Boardroom (Live Negotiation)"]
+        ProcAgent[MegaMart Procurement Agent] <====>|Adversarial Self-Play| SalesAgent[SwiftRoute Sales Agent]
     end
     
-    subgraph WarRoom ["The War Room (Private DM)"]
-        Manager[Human VP of Sales] -->|Whispers / Absolute Overrides| Sales
+    subgraph SalesWarRoom ["Sales War Room"]
+        VPSales[Human VP of Sales] -.->|Tactical Whispers / Overrides| SalesAgent
+    end
+
+    subgraph DataGuardrails ["Data & Guardrails"]
+        ProcDB[(Buyer Mandates DB)] --- ProcAgent
+        SalesAgent --- SalesDB[(Sales CPQ DB)]
     end
     
-    subgraph Guardrails ["Deterministic Guardrails"]
-        Sales -->|JSON Output Validation| CPQ[(SQLite CPQ Database)]
-        CPQ -.->|Blocks hallucinatory math| Sales
-    end
-    
-    style Procurement fill:#ff6b6b,stroke:#c0392b,color:#fff
-    style Sales fill:#4ecdc4,stroke:#16a085,color:#fff
-    style Manager fill:#feca57,stroke:#f39c12,color:#fff
-    style CPQ fill:#5f27cd,stroke:#341f97,color:#fff
+    style ProcAgent fill:#ff6b6b,stroke:#c0392b,color:#fff
+    style SalesAgent fill:#4ecdc4,stroke:#16a085,color:#fff
+    style VPSales fill:#feca57,stroke:#f39c12,color:#fff
+    style HeadSourcing fill:#feca57,stroke:#f39c12,color:#fff
+    style ProcDB fill:#2c3e50,stroke:#2c3e50,color:#fff
+    style SalesDB fill:#2c3e50,stroke:#2c3e50,color:#fff
+
 ```
 
----
+### Cognitive Memory & Dual Executive Reporting
 
-### Cognitive Memory Architecture (RLHF Loop)
-Standard RAG pipelines bloat the LLM context window. ZeroLeak OS uses a Highlander Compaction Loop (O(1) memory growth) combined with In-Band Tagging for zero-latency retrieval.
+ZeroLeak OS features a Split-Persona Judge Agent. Because negotiation is zero-sum, a single AI judge would suffer from Reward Model Bias. We solve this by splitting the Judge's personality post-match to audit each agent independently.
 
 ```mermaid
-graph LR
-    A[Match Ends] --> B(Transcript Ledger)
-    B --> C{Split-Persona Judge Agent}
-    C -->|"Extracts Trigger & Mistake"| D[Semantic Compaction]
-    D -->|Upserts / Overwrites existing rule| E[(Playbook Heuristics DB)]
-    E -->|JIT Retrieval via JSON tags| F[Next Match Inject]
+graph TD
+    A[Match Concludes] --> B(Match Transcript)
+    B --> C{Split-Persona Judge}
     
-    style C fill:#ff9f43,stroke:#ee5253,color:#fff
-    style E fill:#0abde3,stroke:#0984e3,color:#fff
+    C -->|Persona: VP of Sales| D[Sales Audit]
+    C -->|Persona: Head of Sourcing| E[Procurement Audit]
+    
+    D --> F[Sales Executive Report]
+    D --> G[(Upsert: Sales Heuristics)]
+    
+    E --> H[Procurement Executive Report]
+    E --> I[(Upsert: Procurement Heuristics)]
+
+    style C fill:#5f27cd,stroke:#341f97,color:#fff
+    style G fill:#0abde3,stroke:#0984e3,color:#fff
+    style I fill:#0abde3,stroke:#0984e3,color:#fff
+
 ```
 
 ### Key Technical Innovations
 
-*   **Neuro-Symbolic Guardrails:** LLMs cannot do math. The AI is forced to output JSON (`proposed_price: 41`), which the Python orchestrator evaluates against the SQLite CPQ floor. If the LLM tries to go below the floor, the Python script intercepts the API call and forces a rewrite.
-
-*   **Dynamic HITL Escalation:** If the Sales Agent hits a deadlock (5 turns without progress), the state-machine pauses the boardroom and pings the Human Manager for an absolute override decision ("Walk Away" vs "Close the deal").
-
-*   **Split-Persona Evaluator:** To prevent Reward Model Bias, the post-match Judge Agent dynamically swaps its system prompt based on who it is auditing (VP of Sales vs. Head of Sourcing) to generate non-conflicting behavioral heuristics.
+1. **Symmetrical JIT (Just-In-Time) Retrieval:** To prevent LLM context-bloat, agents use In-Band JSON tagging (`"current_friction_points": ["RTO", "Price"]`). The Orchestrator intercepts these tags to fetch only the relevant opponent heuristics for the next turn. Memory stays at O(1).
+2. **Dual-Way HITL Escalation:** If either agent hits a mathematical deadlock or is pushed to their absolute walk-away limit, they automatically pause the Boardroom and ping their respective Human Manager for a final decision ("Walk Away" vs "Close the gap").
+3. **Neuro-Symbolic Guardrails:** The LLM's pricing outputs are constrained by deterministic Python logic. If an agent hallucinates a price outside its SQLite limits, the API call is intercepted and blocked before the opponent ever sees it.

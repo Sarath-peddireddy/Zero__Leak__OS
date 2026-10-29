@@ -4,8 +4,8 @@
 
 ## ▶ Repo layout (2026-10-29, supersedes file paths below)
 - GitHub: https://github.com/Sarath-peddireddy/Zero__Leak__OS (`main`). Code in `src\`, dev docs in `docs\`, live DB at `data\zeroleak.db` (gitignored), `.env` stays in the root.
-- Run: `start_bot.cmd` / `run_benchmark.cmd` (root), or `.venv\Scripts\python -X utf8 srcot_main.py`. Tests: `testsun_all.cmd` (paths now relative; 118 / 31 / 36 / PASS / 91 after the move).
-- Overnight run `bench_runs61028_212553` died at after-match 1 (no results.json); last complete runs: `20261028_200329`, `20261028_203221`.
+- Run: `start_bot.cmd` / `run_benchmark.cmd` (root), or `.venv\Scripts\python -X utf8 src\bot_main.py`. Tests: `tests\run_all.cmd` (paths now relative; 118 / 31 / 36 / PASS / 91 after the move).
+- Overnight run `bench_runs\20261028_212553` died at after-match 1 (no results.json); last complete runs: `20261028_200329`, `20261028_203221`.
 
 ## ▶ Resume here (2026-10-27 evening, supersedes the list below where they differ)
 - **Benchmark done (5 + 5, same code):** before = `bench_runs\20261027_202801`, after = `bench_runs\20261027_211435`. After vs before: avg deal ₹42.0 vs ₹41.0, payment 30 vs 50 days, 15.2 vs 19.6 msgs, 0.4 vs 0.8 escalations, deals 2/5 vs 3/5, 1 match capped (after #3). The overnight 10-26 run died when the PC slept (1 match only).

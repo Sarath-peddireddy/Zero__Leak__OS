@@ -1,0 +1,11 @@
+.env
+__pycache__/
+*.db
+.venv/
+bench_runs/
+logs/
+tests/bench_test/
+*.db-journal
+*.db-wal
+*.db-shm
+*.pyc

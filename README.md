@@ -4,10 +4,11 @@
 
 ### The Bloodbath (The Problem)
 Enterprise B2B negotiation is a zero-sum game plagued by human error and psychological pressure. 
-*   **The Margin Leakage:** Junior Sales Execs panic under pressure, yielding on SLAs and Payment Terms, silently bleeding 3% of corporate profit margins.
-*   **The Cost Inefficiency:** Junior Procurement Officers fail to leverage market conditions or competitor quotes, overpaying for multi-year vendor lock-ins.
 
-Both sides are leaving millions on the table because they only practice when real money is on the line. 
+*   **The Sales Bleed (Margin Leakage):** A junior Account Executive gets ambushed on a Zoom call by a veteran buyer. They panic and yield just **₹2 per parcel** on a 1.5M parcel/month contract to save the deal. That single 30-second mistake silently bleeds **₹3.6 Crores in pure profit annually** (1.5M x 12 months x ₹2) from a single account. Multiply that across a sales floor, and it is an EBITDA crisis.
+*   **The Procurement Bleed (Cost Inefficiency):** Junior Procurement Officers fail to leverage market conditions or competitor quotes, overpaying for multi-year vendor lock-ins and failing to secure RTO (Return to Origin) waivers. 
+
+Both sides are leaving millions on the table because, right now, their only practice arena is when real money is on the line.
 
 ### The Engine (The Solution)
 ZeroLeak OS is a Neuro-Symbolic, Adversarial Self-Play Arena. We deploy two autonomous, data-driven AI agents against each other in a live Telegram environment: **SwiftRoute Logistics (Sales)** vs. **MegaMart (Procurement)**.
@@ -19,38 +20,49 @@ Both agents negotiate fiercely based on distinct SQLite databases (CPQ floors vs
 ### Symmetrical Architecture (The Arena)
 
 ```mermaid
-flowchart LR
-    %% Buyer Side (Left)
-    subgraph Procurement [MegaMart Procurement]
-        HumanBuyer(👤 Head of Sourcing) -.->|HITL Overrides| ProcAgent[🤖 Procurement Agent]
-        ProcDB[(🗄️ Mandates DB)] ===>|"Limits & Ammo"| ProcAgent
+flowchart TB
+    %% Buyer side (left): database outermost, human inside
+    subgraph Buyer ["🔴 MegaMart · Buyer Side"]
+        direction TB
+        ProcDB[(🗄️ Mandates DB<br/>target · walk-away)]
+        HumanBuyer(👤 Head of Sourcing)
+        ProcAgent[🤖 Procurement Agent]
+        ProcDB ==>|hard limits| ProcAgent
+        HumanBuyer -.->|live whispers| ProcAgent
     end
 
-    %% Seller Side (Right)
-    subgraph Sales [SwiftRoute Sales]
-        HumanSales(👤 VP of Sales) -.->|HITL Overrides| SalesAgent[🤖 Sales Agent]
-        SalesDB[(🗄️ CPQ DB)] ===>|"Floor Price & Ammo"| SalesAgent
+    %% Seller side (right): mirror image
+    subgraph Seller ["🟢 SwiftRoute · Seller Side"]
+        direction TB
+        HumanSales(👤 VP of Sales)
+        SalesDB[(🗄️ CPQ DB<br/>list price · floor price)]
+        SalesAgent[🤖 Sales Agent]
+        HumanSales -.->|live whispers| SalesAgent
+        SalesDB ==>|hard limits| SalesAgent
     end
 
-    %% The Arena (Center)
-    subgraph Arena [ZeroLeak Orchestrator]
-        Guardrails{⚙️ Deterministic<br/>Python Guardrails}
-    end
+    %% Every offer is checked before the opponent sees it
+    ProcAgent -->|draft offer| Guardrails{{⚙️ Python Guardrails<br/>checks every price}}
+    SalesAgent -->|draft offer| Guardrails
+    Guardrails ==>|only valid offers posted| Boardroom[[💬 The Boardroom<br/>live Telegram negotiation]]
 
-    %% Arena links (declared outside the boxes so each agent stays in its own side)
-    ProcAgent <===>|Live Telegram<br/>Adversarial Play| SalesAgent
-    Guardrails -.->|Intercepts Hallucinations<br/>Forces JSON Math| ProcAgent
-    Guardrails -.->|Intercepts Hallucinations<br/>Forces JSON Math| SalesAgent
+    %% Colours: red = buyer, green = seller, amber = humans, slate = data, purple = control, blue = arena
+    classDef buyer fill:#ff4757,stroke:#c0392b,color:#fff,stroke-width:2px
+    classDef seller fill:#2ed573,stroke:#1e9e50,color:#fff,stroke-width:2px
+    classDef human fill:#ffd166,stroke:#e09f00,color:#3d2c00
+    classDef data fill:#2f3542,stroke:#1e2229,color:#fff
+    classDef control fill:#5352ed,stroke:#3742fa,color:#fff,stroke-width:2px
+    classDef arena fill:#1e90ff,stroke:#0b5ed7,color:#fff,stroke-width:2px
 
-    %% Custom Colors
-    style ProcAgent fill:#ff4757,stroke:#c0392b,color:#fff,stroke-width:2px
-    style SalesAgent fill:#2ed573,stroke:#27ae60,color:#fff,stroke-width:2px
-    style HumanBuyer fill:#feca57,stroke:#e67e22,color:#fff
-    style HumanSales fill:#feca57,stroke:#e67e22,color:#fff
-    style Guardrails fill:#5352ed,stroke:#3742fa,color:#fff
-    style ProcDB fill:#2f3542,color:#fff
-    style SalesDB fill:#2f3542,color:#fff
-    style Arena fill:#f1f2f6,stroke:#ced6e0,stroke-width:2px,stroke-dasharray: 5 5
+    class ProcAgent buyer
+    class SalesAgent seller
+    class HumanBuyer,HumanSales human
+    class ProcDB,SalesDB data
+    class Guardrails control
+    class Boardroom arena
+
+    style Buyer fill:#fff1f2,stroke:#ff4757,stroke-width:2px,color:#c0392b
+    style Seller fill:#effcf3,stroke:#2ed573,stroke-width:2px,color:#1e7e45
 ```
 
 ### Cognitive Memory & Dual Executive Reporting

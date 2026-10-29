@@ -40,3 +40,28 @@ graph TD
     style Manager fill:#feca57,stroke:#f39c12,color:#fff
     style CPQ fill:#5f27cd,stroke:#341f97,color:#fff
 ```
+
+---
+
+### Cognitive Memory Architecture (RLHF Loop)
+Standard RAG pipelines bloat the LLM context window. ZeroLeak OS uses a Highlander Compaction Loop (O(1) memory growth) combined with In-Band Tagging for zero-latency retrieval.
+
+```mermaid
+graph LR
+    A[Match Ends] --> B(Transcript Ledger)
+    B --> C{Split-Persona Judge Agent}
+    C -->|"Extracts Trigger & Mistake"| D[Semantic Compaction]
+    D -->|Upserts / Overwrites existing rule| E[(Playbook Heuristics DB)]
+    E -->|JIT Retrieval via JSON tags| F[Next Match Inject]
+    
+    style C fill:#ff9f43,stroke:#ee5253,color:#fff
+    style E fill:#0abde3,stroke:#0984e3,color:#fff
+```
+
+### Key Technical Innovations
+
+*   **Neuro-Symbolic Guardrails:** LLMs cannot do math. The AI is forced to output JSON (`proposed_price: 41`), which the Python orchestrator evaluates against the SQLite CPQ floor. If the LLM tries to go below the floor, the Python script intercepts the API call and forces a rewrite.
+
+*   **Dynamic HITL Escalation:** If the Sales Agent hits a deadlock (5 turns without progress), the state-machine pauses the boardroom and pings the Human Manager for an absolute override decision ("Walk Away" vs "Close the deal").
+
+*   **Split-Persona Evaluator:** To prevent Reward Model Bias, the post-match Judge Agent dynamically swaps its system prompt based on who it is auditing (VP of Sales vs. Head of Sourcing) to generate non-conflicting behavioral heuristics.

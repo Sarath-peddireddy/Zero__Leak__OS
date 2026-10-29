@@ -19,31 +19,38 @@ Both agents negotiate fiercely based on distinct SQLite databases (CPQ floors vs
 ### Symmetrical Architecture (The Arena)
 
 ```mermaid
-graph TD
-    subgraph ProcWarRoom ["Procurement War Room"]
-        HeadSourcing[Human Head of Sourcing] -.->|Tactical Whispers / Overrides| ProcAgent
+flowchart LR
+    %% Buyer Side (Left)
+    subgraph Procurement [MegaMart Procurement]
+        HumanBuyer(👤 Head of Sourcing) -.->|HITL Overrides| ProcAgent[🤖 Procurement Agent]
+        ProcDB[(🗄️ Mandates DB)] ===>|"Limits & Ammo"| ProcAgent
     end
 
-    subgraph Boardroom ["The Boardroom (Live Negotiation)"]
-        ProcAgent[MegaMart Procurement Agent] <====>|Adversarial Self-Play| SalesAgent[SwiftRoute Sales Agent]
-    end
-    
-    subgraph SalesWarRoom ["Sales War Room"]
-        VPSales[Human VP of Sales] -.->|Tactical Whispers / Overrides| SalesAgent
+    %% Seller Side (Right)
+    subgraph Sales [SwiftRoute Sales]
+        HumanSales(👤 VP of Sales) -.->|HITL Overrides| SalesAgent[🤖 Sales Agent]
+        SalesDB[(🗄️ CPQ DB)] ===>|"Floor Price & Ammo"| SalesAgent
     end
 
-    subgraph DataGuardrails ["Data & Guardrails"]
-        ProcDB[(Buyer Mandates DB)] --- ProcAgent
-        SalesAgent --- SalesDB[(Sales CPQ DB)]
+    %% The Arena (Center)
+    subgraph Arena [ZeroLeak Orchestrator]
+        Guardrails{⚙️ Deterministic<br/>Python Guardrails}
     end
-    
-    style ProcAgent fill:#ff6b6b,stroke:#c0392b,color:#fff
-    style SalesAgent fill:#4ecdc4,stroke:#16a085,color:#fff
-    style VPSales fill:#feca57,stroke:#f39c12,color:#fff
-    style HeadSourcing fill:#feca57,stroke:#f39c12,color:#fff
-    style ProcDB fill:#2c3e50,stroke:#2c3e50,color:#fff
-    style SalesDB fill:#2c3e50,stroke:#2c3e50,color:#fff
 
+    %% Arena links (declared outside the boxes so each agent stays in its own side)
+    ProcAgent <===>|Live Telegram<br/>Adversarial Play| SalesAgent
+    Guardrails -.->|Intercepts Hallucinations<br/>Forces JSON Math| ProcAgent
+    Guardrails -.->|Intercepts Hallucinations<br/>Forces JSON Math| SalesAgent
+
+    %% Custom Colors
+    style ProcAgent fill:#ff4757,stroke:#c0392b,color:#fff,stroke-width:2px
+    style SalesAgent fill:#2ed573,stroke:#27ae60,color:#fff,stroke-width:2px
+    style HumanBuyer fill:#feca57,stroke:#e67e22,color:#fff
+    style HumanSales fill:#feca57,stroke:#e67e22,color:#fff
+    style Guardrails fill:#5352ed,stroke:#3742fa,color:#fff
+    style ProcDB fill:#2f3542,color:#fff
+    style SalesDB fill:#2f3542,color:#fff
+    style Arena fill:#f1f2f6,stroke:#ced6e0,stroke-width:2px,stroke-dasharray: 5 5
 ```
 
 ### Cognitive Memory & Dual Executive Reporting
@@ -51,23 +58,37 @@ graph TD
 ZeroLeak OS features a Split-Persona Judge Agent. Because negotiation is zero-sum, a single AI judge would suffer from Reward Model Bias. We solve this by splitting the Judge's personality post-match to audit each agent independently.
 
 ```mermaid
-graph TD
-    A[Match Concludes] --> B(Match Transcript)
-    B --> C{Split-Persona Judge}
-    
-    C -->|Persona: VP of Sales| D[Sales Audit]
-    C -->|Persona: Head of Sourcing| E[Procurement Audit]
-    
-    D --> F[Sales Executive Report]
-    D --> G[(Upsert: Sales Heuristics)]
-    
-    E --> H[Procurement Executive Report]
-    E --> I[(Upsert: Procurement Heuristics)]
+flowchart TD
+    Transcript(📄 Match Concludes:<br/>Raw Transcript) --> Judge{⚖️ Split-Persona<br/>Judge Engine}
 
-    style C fill:#5f27cd,stroke:#341f97,color:#fff
-    style G fill:#0abde3,stroke:#0984e3,color:#fff
-    style I fill:#0abde3,stroke:#0984e3,color:#fff
+    %% Procurement Analysis Route
+    subgraph ProcEval [Buyer Analysis]
+        ProcReport[📊 Executive Buyer Report]
+        ProcHeuristics[(🧠 Buyer Heuristics DB)]
+    end
 
+    %% Sales Analysis Route
+    subgraph SalesEval [Seller Analysis]
+        SalesReport[📊 Executive Sales Report]
+        SalesHeuristics[(🧠 Sales Heuristics DB)]
+    end
+
+    %% Judge links (declared outside the boxes so the Judge stays above both)
+    Judge -->|Loads Sourcing Persona| ProcReport
+    Judge -->|Extracts Margin Leaks| ProcHeuristics
+    Judge -->|Loads Sales VP Persona| SalesReport
+    Judge -->|Extracts Margin Leaks| SalesHeuristics
+
+    %% RLHF Feedback Loop
+    ProcHeuristics -.->|In-Band JSON Tagging<br/>JIT Retrieval| NextMatch(Next Match Inject)
+    SalesHeuristics -.->|In-Band JSON Tagging<br/>JIT Retrieval| NextMatch
+
+    %% Custom Colors
+    style Judge fill:#5f27cd,stroke:#341f97,color:#fff,stroke-width:2px
+    style ProcHeuristics fill:#ff4757,stroke:#c0392b,color:#fff
+    style SalesHeuristics fill:#2ed573,stroke:#27ae60,color:#fff
+    style ProcReport fill:#f1f2f6,stroke:#ced6e0
+    style SalesReport fill:#f1f2f6,stroke:#ced6e0
 ```
 
 ### Key Technical Innovations

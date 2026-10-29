@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 SCRATCH = Path(__file__).resolve().parent
-sys.path.insert(0, r"C:\Users\sarat\Desktop\zeroleakos")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 sys.argv = ["headless_runner.py", "--matches", "1", "--delay", "0", "--out", str(SCRATCH / "bench_test")]
 import headless_runner as H  # noqa: E402
 
@@ -61,7 +61,7 @@ print(("PASS" if nb == 0 and na == 5 else "FAIL") + f" playbooks: before={nb} af
 sales_prompts = [s for a, s in CALLS if a == "sales"]
 print(("PASS" if any("PLAYBOOK" in s for s in sales_prompts) and not all("PLAYBOOK" in s for s in sales_prompts)
        else "FAIL") + " after arm sees lessons, before arm does not")
-real = sqlite3.connect(r"C:\Users\sarat\Desktop\zeroleakos\zeroleak.db").execute(
+real = sqlite3.connect(Path(__file__).resolve().parent.parent / "data" / "zeroleak.db").execute(
     "select count(*) from match_transcripts where match_id in (%s)" % ",".join("?" * len(data["matches"])),
     [r["match_id"] for r in data["matches"]]).fetchone()[0]
 print(("PASS" if real == 0 else "FAIL") + " real zeroleak.db untouched by the run")

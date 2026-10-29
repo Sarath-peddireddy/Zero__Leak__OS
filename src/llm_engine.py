@@ -33,7 +33,7 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import errors, types
 
-load_dotenv(Path(__file__).resolve().parent / ".env")
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")  # .env lives in the project root
 
 logger = logging.getLogger("zeroleak.llm")
 

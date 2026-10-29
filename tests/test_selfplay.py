@@ -9,9 +9,9 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-PROJECT = Path(r"C:\Users\sarat\Desktop\zeroleakos")
+PROJECT = Path(__file__).resolve().parent.parent
 SCRATCH = Path(__file__).resolve().parent
-sys.path.insert(0, str(PROJECT))
+sys.path.insert(0, str(PROJECT / "src"))
 
 import db_init  # noqa: E402
 

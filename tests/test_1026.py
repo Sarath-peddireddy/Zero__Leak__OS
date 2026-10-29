@@ -8,14 +8,14 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace as NS
 
-PROJECT = Path(r"C:\Users\sarat\Desktop\zeroleakos")
+PROJECT = Path(__file__).resolve().parent.parent
 SCRATCH = Path(__file__).resolve().parent
-sys.path.insert(0, str(PROJECT))
+sys.path.insert(0, str(PROJECT / "src"))
 
 import db_init  # noqa: E402
 
 TEST_DB = SCRATCH / "test_1026.db"
-shutil.copy(PROJECT / "zeroleak.db", TEST_DB)
+shutil.copy(PROJECT / "data" / "zeroleak.db", TEST_DB)
 db_init.DB_PATH = TEST_DB
 
 import httpx  # noqa: E402

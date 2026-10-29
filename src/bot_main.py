@@ -54,7 +54,7 @@ import post_match
 import reports
 from db_init import fetch_cpq_tiers, fetch_heuristics, fetch_mandate, fetch_static_ammo, init_db, log_message
 
-load_dotenv(Path(__file__).resolve().parent / ".env")
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")  # .env lives in the project root
 
 logger = logging.getLogger("zeroleak.bot")
 

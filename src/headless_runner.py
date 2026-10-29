@@ -16,10 +16,10 @@ Fair comparison:
 Deal terms come from the same extraction call as the end-of-match report (reports.extract_terms).
 
 Usage:
-    python headless_runner.py --matches 5                 # 5 per arm
-    python headless_runner.py --matches 3 --arms after --manager close
-    python headless_runner.py --matches 5 --neha-note ""  # Neha without coaching
-    python headless_runner.py --resume bench_runs/20261027_190000   # continue a cut-short run
+    python src/headless_runner.py --matches 5                 # 5 per arm
+    python src/headless_runner.py --matches 3 --arms after --manager close
+    python src/headless_runner.py --matches 5 --neha-note ""  # Neha without coaching
+    python src/headless_runner.py --resume bench_runs/20261027_190000   # continue a cut-short run
 While it runs, Windows is asked not to sleep on idle (closing the lid or choosing Sleep still stops it).
 Output: bench_runs/<timestamp>/results.json, the two DB copies, and a summary table on stdout.
 """
@@ -38,7 +38,7 @@ from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent  # project root (this file is in src/)
 DEFAULT_NOTE = "Don't go above ₹41. Insist on 12 months and 60-day payment terms. Keep pushing, but never walk away."
 MATCH_TIMEOUT_S = 25 * 60
 # Arjun's Boardroom text that mentions the system or a floor (the fourth wall / "never reveal a floor").
@@ -139,7 +139,7 @@ def prepare_db(run_dir: Path, arm: str, reuse: bool = False) -> Path:
     path = run_dir / f"db_{arm}.db"
     if reuse and path.exists():  # --resume: keep the copy the finished matches were played on
         return path
-    shutil.copy(ROOT / "zeroleak.db", path)
+    shutil.copy(ROOT / "data" / "zeroleak.db", path)
     if arm == "before":
         with sqlite3.connect(path) as c:
             c.execute("DELETE FROM sales_heuristics")

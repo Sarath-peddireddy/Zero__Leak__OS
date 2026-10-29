@@ -32,7 +32,7 @@ from pathlib import Path
 
 logger = logging.getLogger("zeroleak.db")
 
-DB_PATH = Path(__file__).resolve().parent / "zeroleak.db"
+DB_PATH = Path(__file__).resolve().parent.parent / "data" / "zeroleak.db"
 
 SIDES = ("sales", "procurement")
 # Table names come only from these maps (never from user input), so f-string SQL is safe.

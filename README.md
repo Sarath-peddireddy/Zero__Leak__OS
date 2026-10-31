@@ -1,107 +1,83 @@
 # ZeroLeak OS 🛡️
+**The Autonomous B2B Deal Desk & Adversarial Negotiation Engine**
 
-**Autonomous Multi-Agent Deal Desk for live enterprise contract negotiation.**
+### The Bleed (The Problem)
+Enterprise B2B negotiation is a zero-sum game plagued by human emotion and psychological pressure. 
 
-### The Bloodbath (The Problem)
-Enterprise B2B negotiation is a zero-sum game plagued by human error and psychological pressure. 
+Imagine a junior sales rep at a logistics company like **Delhivery** negotiating a contract with a veteran procurement buyer at **Flipkart**. On a live Zoom call, the Flipkart buyer bluffs and threatens to walk away. The junior rep panics and drops the price by just **₹2 per parcel** to save the deal. 
 
-*   **The Sales Bleed (Margin Leakage):** An Account Executive gets ambushed on a Zoom call by a veteran buyer. They panic and yield just **₹2 per parcel** on a 1.5M parcel/month contract to save the deal. That single 30-second mistake silently bleeds **₹3.6 Crores in pure profit annually** (1.5M x 12 months x ₹2) from a single account. Multiply that across a sales floor, and it is an EBITDA crisis.
-*   **The Procurement Bleed (Cost Inefficiency):** Procurement teams fail to leverage market conditions or competitor quotes, overpaying for multi-year vendor lock-ins and failing to secure RTO (Return to Origin) waivers. 
-
-Both sides leave millions on the table because every concession is made by a human under pressure, in real time, with nothing between the impulse and the signed contract.
+On a 1.5 million parcel/month contract, that single 30-second panic attack silently bleeds **₹3.6 Crores in pure profit annually**. Multiply that across a global sales floor, and it is an EBITDA crisis. 
 
 ### The Engine (The Solution)
-ZeroLeak OS is an Autonomous Multi-Agent Deal Desk for live enterprise contract negotiation. Two autonomous, data-driven AI agents negotiate the contract on Telegram: **SwiftRoute Logistics (Sales)** vs. **MegaMart (Procurement)**.
+ZeroLeak OS is an autonomous, multi-agent Deal Desk that removes human panic from the equation. 
 
-Both agents negotiate fiercely from distinct SQLite systems of record (CPQ floors vs. Target Mandates), and every offer is checked against hard limits before the other side sees it. Human executives (VP of Sales & Head of Sourcing) stay in the loop from isolated "War Rooms," whispering strategic overrides to their own agent in real time and answering escalations. Post-match, our Split-Persona Judge audits the transcript, sends tailored executive reports to both department heads, and proposes playbook updates that go live only after a shadow regression test and the manager's explicit approval.
+We deploy two AI agents against each other in a live environment: **Sales** vs. **Procurement**. They handle the grueling, emotionally exhausting back-and-forth of contract negotiation, driven purely by data and limits in their backend databases. 
+
+**The Side Effect (Extreme Training):** While the system is built to negotiate real contracts, it naturally serves as a brutal, risk-free training arena. Junior reps can jump in, take control of the AI, and practice against ruthless simulated buyers before they ever touch real company money.
 
 ---
 
-### Symmetrical Architecture (The Deal Desk)
+### The Architecture (Symmetrical Self-Play)
+The system is perfectly balanced. Both sides have an AI agent doing the talking, constrained by strict database limits, while Human VPs sit behind the scenes steering the strategy.
 
 ```mermaid
-flowchart TB
-    %% Buyer side (left): database outermost, human inside
-    subgraph Buyer ["🔴 MegaMart · Buyer Side"]
-        direction TB
-        ProcDB[(🗄️ Mandates DB<br/>target · walk-away)]
-        HumanBuyer(👤 Head of Sourcing)
-        ProcAgent[🤖 Procurement Agent]
-        ProcDB ==>|hard limits| ProcAgent
-        HumanBuyer -.->|live whispers| ProcAgent
+flowchart LR
+    %% Buyer Side (Left)
+    subgraph Procurement [Flipkart Procurement]
+        HumanBuyer(👤 Head of Sourcing) -.->|Strategic Whispers| ProcAgent[🤖 Procurement Agent]
+        ProcDB[(🗄️ Buyer Target DB)] ===>|Max Budget Limits| ProcAgent
     end
 
-    %% Seller side (right): mirror image
-    subgraph Seller ["🟢 SwiftRoute · Seller Side"]
-        direction TB
-        HumanSales(👤 VP of Sales)
-        SalesDB[(🗄️ CPQ DB<br/>list price · floor price)]
-        SalesAgent[🤖 Sales Agent]
-        HumanSales -.->|live whispers| SalesAgent
-        SalesDB ==>|hard limits| SalesAgent
+    %% The Arena (Center)
+    subgraph Arena [ZeroLeak Orchestrator]
+        ProcAgent <===>|Live Negotiation| SalesAgent
+        Guardrails{⚙️ Python Guardrails} -.->|Blocks AI Hallucinations| ProcAgent
+        Guardrails -.->|Blocks AI Hallucinations| SalesAgent
     end
 
-    %% Every offer is checked before the opponent sees it
-    ProcAgent -->|draft offer| Guardrails{{⚙️ Python Guardrails<br/>checks every price}}
-    SalesAgent -->|draft offer| Guardrails
-    Guardrails ==>|only valid offers posted| Boardroom[[💬 The Boardroom<br/>live Telegram negotiation]]
+    %% Seller Side (Right)
+    subgraph Sales [Delhivery Sales]
+        HumanSales(👤 VP of Sales) -.->|Strategic Whispers| SalesAgent[🤖 Sales Agent]
+        SalesDB[(🗄️ Sales CPQ DB)] ===>|Floor Price Limits| SalesAgent
+    end
 
-    %% Colours: red = buyer, green = seller, amber = humans, slate = data, purple = control, blue = boardroom
-    classDef buyer fill:#ff4757,stroke:#c0392b,color:#fff,stroke-width:2px
-    classDef seller fill:#2ed573,stroke:#1e9e50,color:#fff,stroke-width:2px
-    classDef human fill:#ffd166,stroke:#e09f00,color:#3d2c00
-    classDef data fill:#2f3542,stroke:#1e2229,color:#fff
-    classDef control fill:#5352ed,stroke:#3742fa,color:#fff,stroke-width:2px
-    classDef boardroom fill:#1e90ff,stroke:#0b5ed7,color:#fff,stroke-width:2px
+    %% Custom Colors (Clear Theme)
+    style ProcAgent fill:#e74c3c,stroke:#c0392b,color:#fff,stroke-width:2px
+    style SalesAgent fill:#2ecc71,stroke:#27ae60,color:#fff,stroke-width:2px
+    style HumanBuyer fill:#f39c12,stroke:#e67e22,color:#fff
+    style HumanSales fill:#f39c12,stroke:#e67e22,color:#fff
+    style Guardrails fill:#34495e,stroke:#2c3e50,color:#fff
+    style ProcDB fill:#bdc3c7,color:#333
+    style SalesDB fill:#bdc3c7,color:#333
+    style Arena fill:#f8f9fa,stroke:#ced6e0,stroke-width:2px,stroke-dasharray: 5 5
 
-    class ProcAgent buyer
-    class SalesAgent seller
-    class HumanBuyer,HumanSales human
-    class ProcDB,SalesDB data
-    class Guardrails control
-    class Boardroom boardroom
-
-    style Buyer fill:#fff1f2,stroke:#ff4757,stroke-width:2px,color:#c0392b
-    style Seller fill:#effcf3,stroke:#2ed573,stroke-width:2px,color:#1e7e45
 ```
 
-### Cognitive Memory, Staging Gate & Dual Executive Reporting
+### Careful AI (Governance & HITL)
 
-ZeroLeak OS features a Split-Persona Judge Agent. Because negotiation is zero-sum, a single AI judge would suffer from Reward Model Bias. We solve this by splitting the Judge's personality post-match to audit each agent independently.
+No AI goes rogue. We built ZeroLeak OS with **"Defense in Depth"** so humans never lose control of the financial outcome.
 
-Because these agents negotiate real contracts, **memory regression** (the Judge overwriting a good rule with a worse one) is a financial risk. So the Judge never writes the live playbook: every proposed change waits in a staging table, is shadow-tested headless against the current rule, and goes live only when the human manager taps ✅ Approve.
+* **The Executive Sign-Off Gate:** The AI agents do all the talking, but they cannot legally sign a deal or walk away. When they reach an agreement, the system pauses and pings the Human VP on Telegram: *"Deal reached at ₹41. ✅ Authorize Signature or ❌ Reject."*
+* **InfoSec Constraints:** The AI is strictly trained to bluff without ever revealing its true walk-away price to the opponent.
 
-```mermaid
-flowchart TD
-    Transcript(📄 Match Concludes:<br/>Raw Transcript) --> Judge{⚖️ Split-Persona<br/>Judge Engine}
+### The Memory Pipeline (CI/CD for AI)
 
-    Judge -->|Loads Sourcing Persona| ProcReport[📊 Executive Buyer Report]
-    Judge -->|Loads Sales VP Persona| SalesReport[📊 Executive Sales Report]
-    Judge -->|Proposes rule changes| Staging[(⏳ Staging Gate<br/>pending_lessons)]
+When an AI makes a mistake, our "Judge Agent" reads the chat and writes a new rule so it never happens again. But we don't just trust the AI blindly.
 
-    Staging --> Shadow[🧪 Shadow Regression<br/>5 headless matches with vs without the rule]
-    Shadow -->|Delta: margin · deals · payment days| Approval(👤 Manager: ✅ Approve / ❌ Reject)
+* **Shadow Testing:** Before a new rule goes live, the system instantly plays 5 silent background matches using the new rule.
+* **Mathematical Proof:** It proves the rule makes more money, then sends a message to the Human VP: *"New tactic found. Shadow test shows it increases margin by +₹0.50. ✅ Approve."*
 
-    Approval -->|✅ Buyer rule| ProcHeuristics[(🧠 Buyer Heuristics DB)]
-    Approval -->|✅ Seller rule| SalesHeuristics[(🧠 Sales Heuristics DB)]
+### The Scoreboard (Metrics)
 
-    %% JIT feedback loop
-    ProcHeuristics -.->|In-Band JSON Tagging<br/>JIT Retrieval| NextMatch(Next Match Inject)
-    SalesHeuristics -.->|In-Band JSON Tagging<br/>JIT Retrieval| NextMatch
+We measure success through raw business impact:
 
-    style Judge fill:#5f27cd,stroke:#341f97,color:#fff,stroke-width:2px
-    style Staging fill:#2f3542,stroke:#1e2229,color:#fff
-    style Shadow fill:#5352ed,stroke:#3742fa,color:#fff
-    style Approval fill:#ffd166,stroke:#e09f00,color:#3d2c00
-    style ProcHeuristics fill:#ff4757,stroke:#c0392b,color:#fff
-    style SalesHeuristics fill:#2ed573,stroke:#27ae60,color:#fff
-    style ProcReport fill:#f1f2f6,stroke:#ced6e0
-    style SalesReport fill:#f1f2f6,stroke:#ced6e0
-```
+1. **Margin Retained:** Average closing price vs. absolute floor price.
+2. **Deal Velocity:** How many turns it takes to close.
+3. **Deadlock Resolution:** How often the AI successfully de-escalates without bothering the human VP.
 
-### Key Technical Innovations
+### The Frontier (Known Challenges)
 
-1. **Symmetrical JIT (Just-In-Time) Retrieval:** To prevent LLM context-bloat, agents use In-Band JSON tagging (`"current_friction_points": ["RTO", "Price"]`). The Orchestrator intercepts these tags to fetch only the relevant opponent heuristics for the next turn. Memory stays at O(1).
-2. **Dual-Way HITL Escalation:** If either agent hits a mathematical deadlock or is pushed to their absolute walk-away limit, they automatically pause the Boardroom and ping their respective Human Manager (in that side's own War Room) for a final decision ("Walk Away" vs "Close the gap"). The decision becomes an absolute override for the rest of the negotiation.
-3. **Neuro-Symbolic Guardrails:** The LLM's pricing outputs are constrained by deterministic Python logic. If an agent hallucinates a price outside its SQLite limits, the API call is intercepted and blocked before the opponent ever sees it.
-4. **HITL Memory Staging Gate + Shadow Regression:** No rule reaches a live agent on the Judge's word alone. Each proposal is played 5 matches with and 5 without (AI vs AI, interleaved, on database copies), and the manager approves with the measured delta in front of them: *"🧠 Playbook Update Proposed. Shadow Test: Avg closing margin ₹1 → ₹1.5/parcel (+₹0.5/parcel). ✅ Approve / ❌ Reject"*.
+Building autonomous negotiators exposed two fascinating challenges that we engineered around:
+
+1. **Goal Displacement:** AI naturally wants to please people. It will often ignore its own rules just to make the opponent happy and close the deal. We fixed this by building an "Attention Hierarchy" that forces the AI to prioritize profit over agreement.
+2. **Instruction Bleed:** When a human manager types an urgent command, the AI sometimes panics and quotes the manager directly to the opponent. We built anti-plagiarism filters to force the AI to act naturally.

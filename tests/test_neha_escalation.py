@@ -42,7 +42,12 @@ def check(name, cond, detail=""):
 CALLS, SCRIPT = [], {"procurement": [], "sales": [], "judge": []}
 
 
+WATCHDOG: list[str] = []  # scripted fourth-wall watchdog verdicts (10-31); default: no slip
+
+
 async def fake_generate(agent, prompt, system_instruction=None, json_mode=False, temperature=None):
+    if system_instruction in sys.modules["post_match"].WATCHDOG_SYSTEM.values():
+        return WATCHDOG.pop(0) if WATCHDOG else '{"violation": false}'
     CALLS.append((agent, prompt, system_instruction))
     if not SCRIPT[agent]:
         raise AssertionError(f"no scripted reply for {agent}")
@@ -329,35 +334,18 @@ async def main():
     check("both decision blocks: persona internalization (user text verbatim)",
           all(INTERNALIZE in blk.format(commands='- "x"') for blk in (N.PROCUREMENT_OVERRIDE_BLOCK, N.OVERRIDE_BLOCK)))
 
-    # ================================================================ 10-31 lexical kill-switch (both agents)
-    check("kill-switch: every banned word caught for both sides, plurals and any case",
-          all(N.banned_words(f"Our {w.upper()}s are clear.", side) for w in
-              ("manager", "playbook", "instruction", "override", "directive", "prompt", "lesson", "critical",
-               "backend", "system") for side in ("sales", "procurement")))
-    check("kill-switch: 'Dedicated Account Manager' is a selling point, not a leak",
-          N.banned_words("You also get a Dedicated Account Manager.", "sales") is None
-          and N.banned_words("Your account managers are great, but my manager disagrees.", "sales") == "manager")
-    check("kill-switch: 'floor' banned for Arjun only (Neha may ask about his floor)",
-          N.banned_words("Is ₹42 really your floor?", "procurement") is None
-          and N.banned_words("₹42 is our floor.", "sales") == "floor")
-    check("kill-switch: no false hit inside other words",
-          N.banned_words("We will pay promptly on systematic schedules.", "procurement") is None)
-    check("kill-switch: listed in both agents' final check",
-          '"backend"' in N.PROCUREMENT_FOURTH_WALL_REMINDER and '"backend"' in N.FOURTH_WALL_REMINDER
-          and '"floor"' in N.FOURTH_WALL_REMINDER and '"floor"' not in N.PROCUREMENT_FOURTH_WALL_REMINDER)
-
-    SCRIPT["procurement"] = [proc("This is critical for us: ₹40/parcel.", 40), proc("₹40/parcel is where we are.", 40)]
+    # ================================================================ 10-31 pivot: no word ban, the Judge watches
+    SCRIPT["procurement"] = [proc("This is critical for us, per our playbook: ₹40/parcel.", 40)]
     CALLS.clear()
     t = await N.procurement_turn([], mandate, [])
-    check("Neha: banned word -> rewritten with the error", t.text.startswith("₹40/parcel is where we are.")
-          and "internal wording" in CALLS[-1][1] and '"critical"' in CALLS[-1][1], (t.text, CALLS[-1][1][-300:]))
-    SCRIPT["procurement"] = [proc("Our system shows ₹44 today. ₹40/parcel works for us.", 40)] * N.MAX_PROCUREMENT_ATTEMPTS
-    t = await N.procurement_turn([], mandate, [])
-    check("Neha: banned word on every attempt -> that sentence scrubbed", t.text.startswith("₹40/parcel works for us."), t.text)
-    SCRIPT["sales"] = [sales("Let me check with my manager on ₹43/parcel.", 43)] * N.MAX_SALES_ATTEMPTS
+    check("Neha: internal vocabulary goes through on the first draft (no retry burned)",
+          t.text.startswith("This is critical for us, per our playbook") and len(CALLS) == 1, (t.text, len(CALLS)))
+    SCRIPT["sales"] = [sales("Our system says ₹43/parcel is our floor.", 43)]
     st = await N.sales_turn([{"role": "procurement", "text": "We ship 1.2M parcels/month."}], [], [], [])
-    check("Arjun: banned word on every attempt -> holding line", st.fell_back and st.text == N.FALLBACK_SALES_LINE
-          and any("internal wording" in str(v) for v in st.blocked), st.text)
+    check("Arjun: internal vocabulary goes through (no holding line)",
+          st.text == "Our system says ₹43/parcel is our floor." and not st.fell_back, st.text)
+    check("no word list left in either agent's final check",
+          '"backend"' not in N.PROCUREMENT_FOURTH_WALL_REMINDER and '"backend"' not in N.FOURTH_WALL_REMINDER)
 
     # 10-31 copy check: escalation overrides count as private text for BOTH agents, 5 words in a row
     SCRIPT["procurement"] = [proc("Okay, we hold the price, if they don't agree we go.", 41), proc("₹41/parcel stands.", 41)]

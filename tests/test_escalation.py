@@ -39,7 +39,12 @@ def check(name, cond, detail=""):
 CALLS, SCRIPT = [], {"procurement": [], "sales": [], "judge": []}
 
 
+WATCHDOG: list[str] = []  # scripted fourth-wall watchdog verdicts (10-31); default: no slip
+
+
 async def fake_generate(agent, prompt, system_instruction=None, json_mode=False, temperature=None):
+    if system_instruction in sys.modules["post_match"].WATCHDOG_SYSTEM.values():
+        return WATCHDOG.pop(0) if WATCHDOG else '{"violation": false}'
     CALLS.append((agent, prompt, system_instruction))
     if not SCRIPT[agent]:
         raise AssertionError(f"no scripted reply for {agent}")
@@ -669,22 +674,13 @@ async def main():
     check("above list: the list price itself is allowed", v == [], v)
     check("hold decision: never raise the price", "never raise it" in s_ovr)
 
-    # Internal wording (bench 2026-10-27: "our absolute floor rate of ₹41")
+    # Internal wording: no Python word ban since 10-31 (the Judge's fourth-wall watchdog handles it after the match)
     reset()
-    SCRIPT["sales"] = [sales("That is our absolute floor rate of ₹42/parcel.", 42),
-                       sales("₹42/parcel is as sharp as we can go.", 42)]
+    SCRIPT["sales"] = [sales("That is our absolute floor rate of ₹42/parcel.", 42)]
     st = await N.sales_turn([{"role": "procurement", "text": "We ship 1.2M parcels/month."}], [], [], [])
-    check("internal words: 'floor' rewritten, no coach note", st.text == "₹42/parcel is as sharp as we can go."
-          and not st.coach_notes, st.text)
-    check("internal words: rewrite prompt names the word", '"floor"' in [p for a, p, s in CALLS if a == "sales"][1])
-    reset()
-    SCRIPT["sales"] = [sales("Our guardrails say ₹42/parcel.", 42)] * 3
-    st = await N.sales_turn([{"role": "procurement", "text": "We ship 1.2M parcels/month."}], [], [], [])
-    # 10-31 lexical kill-switch: a banned word is rejected on every attempt, so it is never posted
-    check("banned words: still there on the last attempt -> holding line, never the leak",
-          st.fell_back and st.text == N.FALLBACK_SALES_LINE, st.text)
-    check("banned words: detector", N.banned_words("our Floor price", "sales") == "Floor"
-          and N.banned_words("₹42/parcel with 30-day terms", "sales") is None)
+    check("internal words: posted as drafted, no retry burned (watchdog catches it post-match)",
+          st.text == "That is our absolute floor rate of ₹42/parcel." and not st.blocked and not st.fell_back, st.text)
+    check("kill-switch removed", not hasattr(N, "banned_words") and not hasattr(N, "internal_words"))
 
     # Two-sided close, other way round (bench 2026-10-28: Arjun "closed" at 30 days while she demanded 60)
     reset()

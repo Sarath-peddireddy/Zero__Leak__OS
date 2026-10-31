@@ -45,8 +45,13 @@ SCRIPT: list[str] = []
 PROMPTS: list[tuple[str, str]] = []
 
 
+WATCHDOG: list[str] = []  # scripted fourth-wall watchdog verdicts (10-31); default: no slip
+
+
 async def fake_generate(agent, prompt, system_instruction=None, json_mode=False, temperature=None):
     PROMPTS.append((prompt, system_instruction or ""))
+    if system_instruction in sys.modules["post_match"].WATCHDOG_SYSTEM.values():
+        return WATCHDOG.pop(0) if WATCHDOG else '{"violation": false}'
     return SCRIPT.pop(0)
 
 
@@ -133,6 +138,44 @@ check("one-off filter in both escalation Judge prompts (user text verbatim)",
       all(P._ONE_OFF_RULE in s and "DO NOT create a permanent playbook rule that drops the agent's mathematical "
           "limits. Only create heuristics for tactical negotiation flaws." in s
           for s in (P.ESCALATION_JUDGE_SYSTEM, P.PROCUREMENT_ESCALATION_JUDGE_SYSTEM)))
+
+# ================================================================ 10-31 Fourth-Wall Watchdog (replaces the word ban)
+WD_TEXT = ("You are also a strict Fourth-Wall Watchdog. Scan the transcript to see if the agent ever used internal "
+           "system vocabulary (e.g., 'playbook', 'override', 'instruction', 'backend', 'guardrail', 'prompt'). If they "
+           "did, you MUST extract a high-priority heuristic instructing them to act as a human and never use internal "
+           "simulation vocabulary again. Format this as a strict one-shot rule.")
+check("watchdog: user text verbatim in both sides' Judge, each with its own boss",
+      all(WD_TEXT in P.WATCHDOG_SYSTEM[s] and P.JUDGE_PERSONAS[s] in P.WATCHDOG_SYSTEM[s] for s in ("sales", "procurement")))
+SLIP = "Per our playbook, ₹43/parcel is final."
+RULE = ('Speak only as yourself, a human negotiator; never mention a playbook. Example: instead of "Per our playbook, '
+        '₹43/parcel is final", say "₹43/parcel is the best I can do on 12 months."')
+SCRIPT.clear(); PROMPTS.clear(); sent.clear()
+WATCHDOG[:] = [j({"violation": True, "evidence": SLIP, "past_mistake": "Told the buyer he follows a playbook.",
+                  "new_directive": RULE})]
+ledger("t30_wd", [("Sales_Agent", SLIP)])  # no coaching at all: only the watchdog runs
+outs = run(P.run_judge_agent("t30_wd", notify=notify))
+o = outs[0] if len(outs) == 1 else None
+check("watchdog: a slip in a match with no coaching -> one Communication_Tone proposal",
+      o is not None and (o.action, o.kind, o.topic_tag, o.directive) == ("proposed", "watchdog", "Communication_Tone", RULE),
+      outs)
+wd_calls = [p for p, s in PROMPTS if s in P.WATCHDOG_SYSTEM.values()]
+check("watchdog: reads every message the agent wrote, and only his",
+      len(wd_calls) == 1 and SLIP in wd_calls[0] and "₹43/parcel on 12 months." in wd_calls[0]
+      and "₹41 or we walk." not in wd_calls[0], wd_calls)
+row = run(db_init.fetch_pending(o.heuristic_id)) if o else {}
+check("watchdog: staged for approval, NOT critical (critical lessons authorise walk-aways), slip shown as source",
+      row and row["status"] == "pending" and row["is_critical"] == 0 and SLIP in row["source_note"]
+      and live("Communication_Tone") is None, row)
+check("watchdog: no 'unchanged' alert sent mid-debrief (the approval request follows the shadow test)", not sent, sent)
+check("watchdog: report labels it", any("fourth-wall watchdog" in line for line in reports._lesson_lines(outs, "sales")))
+run(db_init.resolve_pending(o.heuristic_id, False))
+SCRIPT.clear(); PROMPTS.clear()
+ledger("t30_wd_clean", [("Sales_Agent", "₹43/parcel; our dedicated account manager handles prompt payment queries.")])
+check("watchdog: no slip -> nothing staged (Neha not audited while self-play is off)",
+      run(P.run_judge_agent("t30_wd_clean")) == []
+      and len([p for p, s in PROMPTS if s in P.WATCHDOG_SYSTEM.values()]) == 1, PROMPTS)
+WATCHDOG[:] = [j({"violation": True, "evidence": "x", "past_mistake": "", "new_directive": ""})]
+check("watchdog: unusable verdict -> skipped, the Judge run survives", run(P.run_judge_agent("t30_wd_clean")) == [])
 
 # ================================================================ 1. staging gate: every change waits for the coach
 old = {"new_directive": "Below ₹42 only for 18 months, then walk away if she refuses.", "is_critical": 0}

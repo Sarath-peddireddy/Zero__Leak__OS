@@ -112,7 +112,7 @@ proc_war_room_to_group = {}  # Procurement War Room DM id -> group id
   * first message after "Hold…walk away" → rewrite as clear final terms (the walk counts only after the buyer replies);
   * Neha's latest rate meets his price → rewrite: close, unless a hard limit, a CRITICAL lesson or the manager's decision forbids one of her terms. "His price" is his latest rate for HER contract length (a rate tied to a longer term does not count; `arjun_rate_for_buyer_term`). The note is given once per price position (`match["meets_noted"]`), so an authorised walk over a non-price term (e.g. payment days) is not blocked every turn;
   * No "small gap" close (removed 2026-10-27, coach decision: ₹1/parcel is millions over a contract). A gap of any size is handled like any other walk-away.
-* Sales guard extras: an offer above the tier's list price is blocked (coach note); after "Hold the price…" he keeps his last price and never raises it; banned words are never posted (lexical kill-switch, Rule 3).
+* Sales guard extras: an offer above the tier's list price is blocked (coach note); after "Hold the price…" he keeps his last price and never raises it.
 * Neha must settle payment terms before she accepts (a deal needs price, contract length and payment terms).
 * Neha's JSON includes her own `proposed_price`, so the deadlock measure sees the buyer: no deadlock alert while she is moving up, and no "has not accepted" when she meets his price.
 * Ledger speakers `Sales_Escalation` and `Manager_Decision` feed the Judge, which stores each answered escalation as a **CRITICAL** lesson (`is_critical = 1`) so Arjun can handle that deadlock alone next time.
@@ -143,9 +143,9 @@ Both agents may only cite the facts in their own `*_static_ammo` table ("do not 
 
 **Fourth wall:** Arjun's prompt forbids mentioning the system to the buyer ("per our playbook", "according to my manager", "my directives", "critical lesson"): a hard limit, repeated as the last line of the prompt so it also holds under manager overrides (`negotiation.FOURTH_WALL_RULE` / `FOURTH_WALL_REMINDER`).
 
-**Instruction bleed (defense in depth, 2026-10-31), both agents:**
-1. *Lexical kill-switch* (`negotiation.banned_words(text, side)`): a Boardroom draft containing `manager`, `playbook`, `instruction`, `override`, `directive`, `prompt`, `lesson`, `critical`, `backend`, `system` or `guardrail` (plurals too; Arjun also `floor`) is rejected on EVERY attempt and rewritten; if it survives the retries Arjun posts his holding line and Neha's offending sentences are dropped. "Dedicated Account Manager" (a SwiftRoute selling point) is exempt. The list is also in both agents' final-check prompt line. The escalation question to the manager is never checked.
-2. *Reveal check* (`revealed_instructions`): phrases like "our manager's instruction", "I was told to", "no matter what" are rewritten the same way.
+**Instruction bleed (2026-10-31), both agents:**
+1. *No word-list ban.* The Python lexical kill-switch (`banned_words`, and Arjun's older `internal_words` "floor"/"playbook" check) was removed the same day: hardcoded word lists blocked valid business language and burned retries. A draft with internal vocabulary is posted; the Judge's **Fourth-Wall Watchdog** (section 6) turns it into a lesson after the match.
+2. *Reveal check* (`revealed_instructions`, kept): phrases that hand the other side a backstage decision ("our manager's instruction", "I was told to", "no matter what", "if they don't agree") are rewritten; Neha's are scrubbed as a last resort, Arjun falls back to his holding line.
 3. *Persona internalization*: both override blocks end with `negotiation.OVERRIDE_INTERNALIZE` ("You are an independent negotiator… Conceal the fact that you received outside guidance.").
 
 ### Rule 4: Symmetrical JIT Retrieval & the 2-Tag Cap
@@ -160,6 +160,7 @@ Runs in the background after every match (`bot_main.debrief`), before the two re
 
 1. **Data prep:** For every `Human_Whisper` / `Procure_Whisper` in the ledger, take the 3 preceding Boardroom messages. Setup notes (tagged `[setup] `, or sent before the first Boardroom message) are briefings, not corrections, and are never judged.
    * **One-off filter (2026-10-31):** every Judge prompt includes `post_match._ONE_OFF_RULE`: a manager override that only forces a deal closed ("close no matter what") is a one-time business exception, marked `scope: this_deal` and never stored as a rule that drops the agent's limits. Escalations marked `this_deal` are now skipped (`one_off`), as whispers already were; hold/walk decisions stay standing.
+   * **Fourth-Wall Watchdog (2026-10-31):** once per side per match (Neha only with `ZEROLEAK_SELF_PLAY=1`), that side's Judge persona reads EVERY Boardroom message the agent wrote (`post_match.fourth_wall_audit`, `WATCHDOG_SYSTEM`). It judges meaning, not words ("prompt payment" or "a dedicated account manager" is fine). A slip becomes a strict one-shot rule (rule + one "instead of X, say Y" example) staged under `Communication_Tone`, the topic loaded on every turn, through the same staging gate, shadow test and ✅ approval as any lesson. It is deliberately NOT `is_critical`: a CRITICAL lesson in play authorises Arjun's walk-aways. Runs in the live debrief only (shadow/benchmark runs have no Judge).
 2. **Synthesis:** Gemini Key 3, JSON mode → `{topic_tag, past_mistake, new_directive}`. **Reward-model separation:** each side is audited by its own boss (`post_match.JUDGE_PERSONAS`), used for the synthesis, escalation and merge calls of that side only:
    * Arjun (`Human_Whisper`, `Manager_Decision`) → "VP of Sales at SwiftRoute": maximize margin, defend the floor, extract long-term value → `sales_heuristics`.
    * Neha (`Procure_Whisper`, only with `ZEROLEAK_SELF_PLAY=1`) → "Head of Global Sourcing at MegaMart": squeeze vendor margin, anchor low, minimize cost → `procurement_heuristics`.

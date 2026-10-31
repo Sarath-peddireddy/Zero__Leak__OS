@@ -177,7 +177,7 @@ def _lesson_lines(outcomes: list | None, side: str) -> list[str]:
         return ["• Could not be reviewed this time (the AI service was unavailable)."]
     mine = [o for o in outcomes if o.side == side]
     if not mine:
-        return ["• None: no guidance was sent during this negotiation."]
+        return ["• None: no guidance was sent and no fourth-wall slip was found."]
     # One entry per topic (one master lesson per topic): the live lesson and the proposed replacement.
     lines, by_topic = [], {}
     for o in mine:
@@ -191,7 +191,8 @@ def _lesson_lines(outcomes: list | None, side: str) -> list[str]:
             by_topic.setdefault(o.topic_tag, []).append(o)
     for topic, outs in by_topic.items():
         last = outs[-1]  # later notes on a topic fold into the same proposal
-        tag = "critical, from your decision; " if any(getattr(o, "kind", "whisper") == "escalation" for o in outs) else ""
+        kinds = {getattr(o, "kind", "whisper") for o in outs}
+        tag = ("critical, from your decision; " if "escalation" in kinds else "") +               ("fourth-wall watchdog; " if "watchdog" in kinds else "")
         notes = f", from {len(outs)} notes" if len(outs) > 1 else ""
         lines.append(f"• <b>{TOPIC_LABELS.get(topic, topic)}</b> ({tag}waiting for your OK{notes})")
         lines.append(f"   <i>Current:</i> {escape(last.previous) if last.previous else 'none (first lesson on this topic)'}")

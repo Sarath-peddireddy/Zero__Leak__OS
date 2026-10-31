@@ -42,7 +42,12 @@ def check(name, cond, detail=""):
 SCRIPT = {"procurement": [], "sales": [], "judge": []}
 
 
+WATCHDOG: list[str] = []  # scripted fourth-wall watchdog verdicts (10-31); default: no slip
+
+
 async def fake_generate(agent, prompt, system_instruction=None, json_mode=False, temperature=None):
+    if system_instruction in sys.modules["post_match"].WATCHDOG_SYSTEM.values():
+        return WATCHDOG.pop(0) if WATCHDOG else '{"violation": false}'
     return SCRIPT[agent].pop(0)
 
 llm_engine.generate = fake_generate

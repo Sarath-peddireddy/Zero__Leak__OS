@@ -146,6 +146,44 @@ required the intervention, and write the rule that cuts MegaMart's cost next tim
 {_ONE_OFF_RULE}""",
 }
 
+# Fourth-Wall Watchdog (2026-10-31; replaces the Python word-list kill-switch): once per side per match, the
+# side's own Judge reads EVERY Boardroom message that agent wrote. A slip into internal vocabulary becomes a
+# Communication_Tone proposal (that topic is loaded on every turn, so the rule is always in front of the agent).
+# Not is_critical: a CRITICAL lesson in play authorises Arjun's walk-aways (bot_main.walk_block).
+WATCHDOG_TAG = "Communication_Tone"
+AGENT_SPEAKERS = {"sales": "Sales_Agent", "procurement": "Procure_Agent"}
+_WATCHDOG_RULE = """\
+You are also a strict Fourth-Wall Watchdog. Scan the transcript to see if the agent ever used internal system \
+vocabulary (e.g., 'playbook', 'override', 'instruction', 'backend', 'guardrail', 'prompt'). If they did, you \
+MUST extract a high-priority heuristic instructing them to act as a human and never use internal simulation \
+vocabulary again. Format this as a strict one-shot rule.
+Internal vocabulary means talking about how the agent is run: a playbook, lessons, rules or guardrails it was \
+given, overrides, instructions or directives, prompts, the backend or "the system", a floor price, or what its \
+manager told or decided. Ordinary business language is NOT a slip: "prompt payment", "our tracking system", \
+"critical for the festive season", "a dedicated account manager", "let me check internally". Judge the meaning, \
+not the word.
+Output JSON strictly in this format:
+{
+  "violation": true or false,
+  "evidence": "the agent's exact words that broke the fourth wall ('' if none)",
+  "past_mistake": "what the agent said and why it gave the game away ('' if none)",
+  "new_directive": "one strict rule plus ONE example (one-shot): 'Speak only as yourself, a human negotiator; \
+never mention <the vocabulary used>. Example: instead of \\"<the slip>\\", say \\"<the same move in plain \
+business words>\\".' ('' if none)"
+}"""
+WATCHDOG_SYSTEM = {
+    "sales": f"""\
+{JUDGE_PERSONAS["sales"]}
+You are given every Boardroom message Arjun wrote in this negotiation. A buyer who learns that Arjun is \
+coached or scripted gains leverage over SwiftRoute.
+{_WATCHDOG_RULE}""",
+    "procurement": f"""\
+{JUDGE_PERSONAS["procurement"]}
+You are given every Boardroom message Neha wrote in this negotiation. A vendor who learns that Neha is \
+coached or scripted gains leverage over MegaMart.
+{_WATCHDOG_RULE}""",
+}
+
 # Step 4 of the two-way escalation: a deadlock the manager had to break becomes a CRITICAL lesson,
 # written so Arjun can break the same deadlock himself next time without asking.
 ESCALATION_JUDGE_SYSTEM = f"""\
@@ -223,7 +261,7 @@ class JudgeOutcome:
     reason: str = ""            # skipped: SKIP_REASONS key / error; proposed: risk warnings; unchanged: OPEN_PROPOSAL
     directive: str = ""         # the proposed new_directive (merged text when the topic had a rule)
     previous: str = ""          # the live rule's new_directive when proposed ('' = new topic)
-    kind: str = "whisper"       # "whisper" | "escalation" (a CRITICAL deadlock lesson)
+    kind: str = "whisper"       # "whisper" | "escalation" (a CRITICAL deadlock lesson) | "watchdog" (fourth wall)
 
 
 @dataclass
@@ -363,6 +401,24 @@ async def synthesize(block: Block) -> list[tuple[str, dict]]:
     if skips:
         raise Skip(skips[0])
     raise ValueError(f"Judge output missing a valid topic_tag or rule fields: {data}")
+
+
+async def fourth_wall_audit(side: str, ledger: list[dict]) -> tuple[str, dict] | None:
+    """The Fourth-Wall Watchdog for one side: (evidence, rule) when the agent's Boardroom messages used internal
+    vocabulary, else None (also when the agent wrote nothing). Raises ValueError on an unusable verdict."""
+    rows = [r for r in ledger if r["speaker"] == AGENT_SPEAKERS[side]]
+    if not rows:
+        return None
+    name = SPEAKER_NAMES[side].split(" ")[0]
+    prompt = (f"EVERY BOARDROOM MESSAGE {name.upper()} WROTE IN THIS NEGOTIATION:\n"
+              + "\n".join(f"{i}. {r['payload_text']}" for i, r in enumerate(rows, 1)))
+    data = await _judge_json(prompt, WATCHDOG_SYSTEM[side])
+    if data.get("violation") is not True:
+        return None
+    rule = _clean_rule(data)
+    if rule is None:
+        raise ValueError(f"Watchdog found a slip but gave no usable rule: {data}")
+    return str(data.get("evidence") or "").strip(), rule
 
 
 # ---------------------------------------------------------------- Screening (2026-10-30 failure tests)
@@ -557,7 +613,8 @@ def proposal_alert(row: dict, shadow: "shadow_test.ShadowResult | None") -> str:
 
 
 async def run_judge_agent(match_id: str, notify: Notify | None = None) -> list[JudgeOutcome]:
-    """Audit every whisper (both sides) in a finished match and stage the lessons for the coach's OK.
+    """Audit every whisper (both sides) in a finished match and stage the lessons for the coach's OK, then run
+    the Fourth-Wall Watchdog over each agent's Boardroom messages (a slip -> a Communication_Tone proposal).
 
     `notify(side, html_text, None)` (optional, from bot_main) sends a 🧠 alert to that side's War Room for each
     note that changes nothing (not saved / already covered). Staged changes are NOT announced here: pass
@@ -601,6 +658,24 @@ async def run_judge_agent(match_id: str, notify: Notify | None = None) -> list[J
             outcomes.append(outcome)
             if notify is not None and action == "unchanged":
                 await _send_alert(notify, outcome)
+    # Fourth-Wall Watchdog: every match, both sides (Neha only while her learning is on, like her whispers).
+    for side in SIDES:
+        if side == "procurement" and not SELF_PLAY:
+            continue
+        try:
+            found = await fourth_wall_audit(side, ledger)
+            if found is None:
+                continue
+            evidence, rule = found
+            slip = f"Fourth-wall slip: “{evidence}”" if evidence else "Fourth-wall slip"
+            action, ref_id, similarity, previous, risk = await compact(side, WATCHDOG_TAG, rule, note=slip,
+                                                                       run_ids=run_ids)
+        except (ValueError, llm_engine.LLMError) as e:
+            logger.warning("Fourth-wall watchdog skipped %s: %s", side, e)
+            continue  # a technical failure: the next match is audited again
+        logger.info("Judge: %s %s watchdog #%s [%s] %s", action, side, ref_id, WATCHDOG_TAG, slip)
+        outcomes.append(JudgeOutcome(slip, action, side, WATCHDOG_TAG, ref_id, similarity, reason=risk,
+                                     directive=previous, previous=previous, kind="watchdog"))
     # Later notes on a topic fold into the same proposal: every outcome shows the proposal's final text.
     for o in outcomes:
         if o.action == "proposed":
@@ -658,7 +733,7 @@ def format_report(match_id: str, outcomes: list[JudgeOutcome]) -> str:
         return f"Judge: match {match_id} had no whispers, so there was nothing to learn."
     lines = [f"Judge reviewed {len(outcomes)} whisper(s) from match {match_id}:"]
     for o in outcomes:
-        crit = " CRITICAL (deadlock)" if o.kind == "escalation" else ""
+        crit = {"escalation": " CRITICAL (deadlock)", "watchdog": " fourth-wall watchdog"}.get(o.kind, "")
         if o.action == "proposed":
             warn = f" ({o.reason})" if o.reason else ""
             lines.append(f"• {o.side}{crit} [{o.topic_tag}] staged as proposal #{o.heuristic_id}, waits for "

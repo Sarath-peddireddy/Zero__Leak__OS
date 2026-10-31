@@ -1,6 +1,15 @@
 # ZeroLeak OS - Handoff State
-**Current Phase (2026-10-31):** instruction-bleed guardrails built (newest "Resume here"); before that Phase 7 memory pipeline hardening (staging gate + shadow regression); live verification next. Before that: Phase A: verify the Sales Agent + Judge. Two-way escalation live-verified in Telegram (2026-10-26); Arjun handled a match alone using CRITICAL lessons. Phase B (Adversarial Self-Play) parked, see `ROADMAP.md`
+**Current Phase (2026-10-31):** fourth wall handled by the Judge's watchdog, no Python word ban (newest "Resume here"); before that Phase 7 memory pipeline hardening (staging gate + shadow regression); live verification next. Before that: Phase A: verify the Sales Agent + Judge. Two-way escalation live-verified in Telegram (2026-10-26); Arjun handled a match alone using CRITICAL lessons. Phase B (Adversarial Self-Play) parked, see `ROADMAP.md`
 **Status (end of 2026-10-26):** bot LIVE since 21:33 on the latest code (walk-away checks, small-gap close, digits rule). First headless benchmark (5 + 5) was started at 21:42 and left running overnight
+
+## ▶ Resume here (2026-10-31 ~15:45, newest): word ban removed, Judge Fourth-Wall Watchdog instead
+- **Architectural decision (user):** no Python word lists for the fourth wall (false positives on valid business language, burned retries). Slips are posted; the Judge learns from them.
+- **Removed:** `negotiation.banned_words()` / `banned_words_line()` from both agents' drafting loops and final-check prompt lines (this landed inside commit 2057e2d, which committed the whole file). Arjun's old "floor"/"playbook" rewrite (since 10-27) is gone with it.
+- **Kept:** the copy check (2057e2d: 10-word run, or 5-word run with 3+ strategy words; own facts allowed), the reveal check `revealed_instructions` (preset decision wording, "our manager's instruction"), `OVERRIDE_INTERNALIZE`, the Judge one-off filter.
+- **New: Fourth-Wall Watchdog** (`post_match.fourth_wall_audit`, `WATCHDOG_SYSTEM`, user text verbatim + "judge the meaning, not the word"): after every live match, one extra Judge call per side (Neha only with SELF_PLAY) over every Boardroom message that agent wrote. Slip → strict one-shot rule (rule + one "instead of X, say Y" example) → `Communication_Tone` proposal (loaded every turn) → shadow test → ✅/❌ like any lesson. Not CRITICAL on purpose (CRITICAL lessons authorise Arjun's walk-aways, `bot_main.walk_block`). Report label "fourth-wall watchdog". No alert when nothing is found.
+- **Cost:** +1 Judge call per side per match; a slip also costs a shadow run (2 + 2 matches with `.env` dev settings) before the approval request.
+- **Bot:** the copy running since 15:32 loaded the files mid-edit (no watchdog); restart it to pick this up. Proposal #4 was approved at 15:39.
+- Tests: test fakes answer watchdog calls with "no slip" unless scripted (`WATCHDOG` list). escalation 118 / pause 31 / 1026 47 / 1030 68 / 1031 35 / neha_escalation 50 / shadow 32 / runner PASS / selfplay 94.
 
 ## ▶ Resume here (2026-10-31 15:40, live tests 1-2; session zeroleakos-b7 closed)
 - **Bot:** running hidden since 15:32 (test control ON, SELF_PLAY ON, shadow 2 per side from `.env`). Stop: end `python.exe … bot_main.py` in Task Manager. Log `logsot_live.log`. Uncommitted `src/post_match.py` Fourth-Wall Watchdog work belongs to another session (not in commit 2057e2d).
@@ -9,7 +18,7 @@
 - **Test 2 (`cba17478df25`):** 0 drafts sent back; deal ₹42/12m/45d. Arjun used the note (45 days ↔ 18 months), then bent it (45 days on 12 months). Neha invented "our board reviews contracts annually". **Proposal #4** (sales Payment_Terms: 45 days for 18 months instead of 24; ⚠️ critical, removes 24) shadow 2+2 running at close (first pair: control walked away, proposal deal at ₹41/12m, below the ₹42 minimum) → **coach decision pending** in Arjun's DM.
 - Tests: escalation 120 / pause 31 / 1026 47 / 1030 60 / 1031 35 / shadow 32 / neha_escalation 55 / runner PASS / selfplay 94.
 
-## ▶ Resume here (2026-10-31 evening, newest): instruction-bleed guardrails (defense in depth)
+## ▶ Resume here (2026-10-31 ~14:00): instruction-bleed guardrails (item 1, the word ban, was REMOVED at ~15:45)
 - **Why:** live match `e98cf1353a14`: after "Close the deal no matter what", Neha told Arjun "Given our manager's instruction to close the deal no matter what, we accept…"; the Judge then proposed a permanent Neha rule that dropped her ceiling.
 - **Built (both agents, details architecture.md Rule 3 + §6):**
   1. Lexical kill-switch `negotiation.banned_words(text, side)` (replaces Arjun-only `internal_words`): manager, playbook, instruction, override, directive, prompt, lesson, critical, backend, system, guardrail (+ `floor` for Arjun). Rejected on EVERY attempt (was: last attempt posted). Arjun → holding line; Neha → offending sentences dropped, else her holding line (which closes nothing). "Dedicated Account Manager" exempt. List added to both final-check prompt lines.

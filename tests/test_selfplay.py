@@ -24,6 +24,7 @@ shutil.copy(SCRATCH / "zeroleak_backup_before_selfplay.db", TEST_DB)
 db_init.DB_PATH = TEST_DB
 
 import bot_main  # noqa: E402
+bot_main.SIGNOFF_AUTO_APPROVE = True  # these suites test other features; the sign-off gate has its own tests
 import llm_engine  # noqa: E402
 import negotiation as N  # noqa: E402
 import post_match  # noqa: E402
@@ -301,8 +302,8 @@ check("sales whisper still goes to Arjun", match["active_coaching_directives"][0
 proc_replies = [
     j(message="We ship 1.2M parcels/month, Blue Dart is ready. ₹38/parcel.", internal_note="",
       current_friction_points=["Price", "RTO", "SLA"], executed_directive_ids=[0], deal_closed=False, walk_away=False),
-    j(message="₹43/parcel and we sign.", internal_note="", current_friction_points=["Price"],
-      executed_directive_ids=[], deal_closed=True, walk_away=False),
+    j(message="₹43/parcel and we sign.", internal_note="", current_friction_points=["Price"], proposed_price=43,
+      executed_directive_ids=[], deal_closed=True, walk_away=False),  # her rate: within her ₹43 limit (10-31 guard)
 ]
 sales_replies = [
     j(message="₹44/parcel with our 99.98% SLA, 30-day terms.", proposed_price=44, offers_rto_waiver=False,

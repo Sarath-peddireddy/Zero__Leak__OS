@@ -56,9 +56,11 @@ from datetime import datetime, timezone
 
 import llm_engine
 import shadow_test
-from db_init import (HEURISTICS_TABLES, SIDES, fetch_heuristic, fetch_heuristics, fetch_ledger, fetch_pending,
+from db_init import (HEURISTICS_TABLES, SIDES, fetch_cpq_tiers, fetch_heuristic, fetch_heuristics, fetch_ledger,
+                     fetch_mandate, fetch_pending,
                      init_db, save_pending, update_pending)
-from negotiation import FRICTION_TAGS, SELF_PLAY, SPEAKER_NAMES, normalize_friction_points
+from negotiation import (FRICTION_TAGS, SELF_PLAY, SPEAKER_NAMES, applicable_tier, buyer_volume,
+                         normalize_friction_points)
 
 logger = logging.getLogger("zeroleak.judge")
 
@@ -149,7 +151,9 @@ required the intervention, and write the rule that cuts MegaMart's cost next tim
 # Fourth-Wall Watchdog (2026-10-31; replaces the Python word-list kill-switch): once per side per match, the
 # side's own Judge reads EVERY Boardroom message that agent wrote. A slip into internal vocabulary becomes a
 # Communication_Tone proposal (that topic is loaded on every turn, so the rule is always in front of the agent).
-# Not is_critical: a CRITICAL lesson in play authorises Arjun's walk-aways (bot_main.walk_block).
+# InfoSec Watchdog (2026-10-31, same call): it also gets the agent's classified limits, and a revealed limit or
+# internal pricing term ("cost floor", "absolute limit") is a leak too. These lessons are CRITICAL (is_critical=1):
+# safe since the Executive Sign-Off Gate, where a CRITICAL lesson no longer authorizes a walk-away on its own.
 WATCHDOG_TAG = "Communication_Tone"
 AGENT_SPEAKERS = {"sales": "Sales_Agent", "procurement": "Procure_Agent"}
 _WATCHDOG_RULE = """\
@@ -162,10 +166,16 @@ given, overrides, instructions or directives, prompts, the backend or "the syste
 manager told or decided. Ordinary business language is NOT a slip: "prompt payment", "our tracking system", \
 "critical for the festive season", "a dedicated account manager", "let me check internally". Judge the meaning, \
 not the word.
+You are a strict InfoSec Watchdog. If the agent revealed their exact walk-away constraint or used internal system \
+terminology (e.g., 'cost floor', 'absolute limit'), you MUST extract a critical heuristic penalizing them for \
+leaking classified targets.
+The agent's classified limits are listed after the messages. Revealing one means stating that number AS a limit \
+(a floor, ceiling, walk-away, budget or "absolute" limit), e.g. "at ₹43 you are matching our walk-away cost". \
+Naming a number as an offer, a counter or a bluff is allowed. Both kinds of leak count as a violation.
 Output JSON strictly in this format:
 {
   "violation": true or false,
-  "evidence": "the agent's exact words that broke the fourth wall ('' if none)",
+  "evidence": "the agent's exact words that broke the fourth wall or leaked a classified limit ('' if none)",
   "past_mistake": "what the agent said and why it gave the game away ('' if none)",
   "new_directive": "one strict rule plus ONE example (one-shot): 'Speak only as yourself, a human negotiator; \
 never mention <the vocabulary used>. Example: instead of \\"<the slip>\\", say \\"<the same move in plain \
@@ -175,12 +185,12 @@ WATCHDOG_SYSTEM = {
     "sales": f"""\
 {JUDGE_PERSONAS["sales"]}
 You are given every Boardroom message Arjun wrote in this negotiation. A buyer who learns that Arjun is \
-coached or scripted gains leverage over SwiftRoute.
+coached or scripted, or learns his real limits, gains leverage over SwiftRoute.
 {_WATCHDOG_RULE}""",
     "procurement": f"""\
 {JUDGE_PERSONAS["procurement"]}
 You are given every Boardroom message Neha wrote in this negotiation. A vendor who learns that Neha is \
-coached or scripted gains leverage over MegaMart.
+coached or scripted, or learns her real limits, gains leverage over MegaMart.
 {_WATCHDOG_RULE}""",
 }
 
@@ -283,6 +293,9 @@ class Block:
 # Setup notes are logged with this prefix (bot_main.add_whisper(setup=True)), and any note sent before the
 # first Boardroom message is a briefing too: there is no agent behaviour yet for the Judge to learn from.
 SETUP_NOTE_PREFIX = "[setup] "
+# Executive Sign-Off Gate (bot_main.sign_off): requests and approvals carry this prefix. An approval teaches nothing
+# and is skipped; a rejection ("Do not sign at these terms…", or the coach's own words) is judged like a decision.
+SIGNOFF_PREFIX = "[sign-off] "
 
 
 def is_setup_note(payload: str, before: list[dict]) -> bool:
@@ -309,6 +322,8 @@ def context_blocks(ledger: list[dict]) -> list[Block]:
                 continue  # initialization context, not a correction of something the agent did
             blocks.append(Block(side, row["payload_text"], before))
         elif speaker in ESCALATION_SPEAKERS:
+            if row["payload_text"].startswith(SIGNOFF_PREFIX):
+                continue  # an authorized sign-off: nothing to learn
             side, question_speaker = ESCALATION_SPEAKERS[speaker]
             if side == "procurement" and not SELF_PLAY:
                 continue
@@ -403,15 +418,37 @@ async def synthesize(block: Block) -> list[tuple[str, dict]]:
     raise ValueError(f"Judge output missing a valid topic_tag or rule fields: {data}")
 
 
-async def fourth_wall_audit(side: str, ledger: list[dict]) -> tuple[str, dict] | None:
-    """The Fourth-Wall Watchdog for one side: (evidence, rule) when the agent's Boardroom messages used internal
-    vocabulary, else None (also when the agent wrote nothing). Raises ValueError on an unusable verdict."""
+# The coach's /floor and /ceiling are logged as notes with this wording (bot_main.set_floor / set_ceiling).
+_LIMIT_NOTE_RE = re.compile(r"Hard price (floor|ceiling) for this negotiation: never \w+ (?:below|above) ₹(\d+(?:\.\d+)?)")
+
+
+async def classified_limits(side: str, ledger: list[dict]) -> str:
+    """The side's real price limits in this match, for the InfoSec Watchdog: the rate-card floor (Sales, at the
+    buyer's stated volume) or the mandate's walk-away price (Procurement), plus any /floor or /ceiling."""
+    kind = "floor" if side == "sales" else "ceiling"
+    coach = [m.group(2) for r in ledger if WHISPER_SIDES.get(r["speaker"]) == side
+             and (m := _LIMIT_NOTE_RE.search(r["payload_text"])) and m.group(1) == kind]
+    if side == "sales":
+        buyer = [{"role": "procurement", "text": r["payload_text"]} for r in ledger if r["speaker"] == "Procure_Agent"]
+        tier = applicable_tier(await fetch_cpq_tiers(), buyer_volume(buyer))
+        limits = [f"rate-card floor ₹{tier['floor_price']:g}/parcel"]
+    else:
+        limits = [f"walk-away price ₹{(await fetch_mandate())['walk_away_price']:g}/parcel"]
+    limits += [f"{kind} set by the manager for this match ₹{v}/parcel" for v in coach]
+    return "; ".join(limits)
+
+
+async def fourth_wall_audit(side: str, ledger: list[dict], limits: str = "") -> tuple[str, dict] | None:
+    """The Fourth-Wall + InfoSec Watchdog for one side: (evidence, rule) when the agent's Boardroom messages used
+    internal vocabulary or revealed a classified limit (`limits`), else None (also when the agent wrote nothing).
+    Raises ValueError on an unusable verdict."""
     rows = [r for r in ledger if r["speaker"] == AGENT_SPEAKERS[side]]
     if not rows:
         return None
     name = SPEAKER_NAMES[side].split(" ")[0]
     prompt = (f"EVERY BOARDROOM MESSAGE {name.upper()} WROTE IN THIS NEGOTIATION:\n"
-              + "\n".join(f"{i}. {r['payload_text']}" for i, r in enumerate(rows, 1)))
+              + "\n".join(f"{i}. {r['payload_text']}" for i, r in enumerate(rows, 1))
+              + (f"\n\n{name.upper()}'S CLASSIFIED LIMITS (never to be revealed): {limits}" if limits else ""))
     data = await _judge_json(prompt, WATCHDOG_SYSTEM[side])
     if data.get("violation") is not True:
         return None
@@ -663,13 +700,13 @@ async def run_judge_agent(match_id: str, notify: Notify | None = None) -> list[J
         if side == "procurement" and not SELF_PLAY:
             continue
         try:
-            found = await fourth_wall_audit(side, ledger)
+            found = await fourth_wall_audit(side, ledger, await classified_limits(side, ledger))
             if found is None:
                 continue
             evidence, rule = found
-            slip = f"Fourth-wall slip: “{evidence}”" if evidence else "Fourth-wall slip"
-            action, ref_id, similarity, previous, risk = await compact(side, WATCHDOG_TAG, rule, note=slip,
-                                                                       run_ids=run_ids)
+            slip = f"Fourth-wall / InfoSec slip: “{evidence}”" if evidence else "Fourth-wall / InfoSec slip"
+            action, ref_id, similarity, previous, risk = await compact(side, WATCHDOG_TAG, rule, critical=True,
+                                                                       note=slip, run_ids=run_ids)
         except (ValueError, llm_engine.LLMError) as e:
             logger.warning("Fourth-wall watchdog skipped %s: %s", side, e)
             continue  # a technical failure: the next match is audited again

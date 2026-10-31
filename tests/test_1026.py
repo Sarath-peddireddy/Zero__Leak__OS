@@ -114,8 +114,12 @@ check("acting on it in own words passes", N.copied_coaching(
     "We cannot go above ₹41 per parcel. If SwiftRoute won't move, we will have to walk away.", [LEAK]) is None)
 # 10-31 (live match 3bfe8d1f992c): a short run is a leak only when it carries strategy words, not deal terms.
 NOTE = "Don't go above ₹41. Insist on 12 months and 60-day payment terms. Keep pushing, but never walk away."
-check("short run of strategy words from a note is caught", N.copied_coaching(
-    "We will keep pushing, but never walk away from this table.", [NOTE]) == "keep pushing but never walk")
+# 10-31 harness tuning: stop words stripped, then 7 words in a row (5 before).
+check("6 strategy words in a row now pass", N.copied_coaching(
+    "We will keep pushing, but never walk away from this table.", [NOTE]) is None)
+check("7 strategy words in a row from a note are caught", N.copied_coaching(
+    "On payment terms: keep pushing, but never walk away.", [NOTE]) == "payment terms keep pushing but never walk")
+check("stop words do not count toward a run", N._words("We hold the price and it is our call") == ["hold", "price", "call"])
 check("live false alarm: stating the deal terms from a note is the offer, not a leak",
       N.copied_coaching("We need ₹41/parcel and 60 day payment terms.", [NOTE]) is None
       and N.copied_coaching("I can hold 30-day terms on a 12 month deal.",
@@ -132,9 +136,9 @@ check("lesson text quoted is detected", N.copied_coaching(
     ["Hold firm at a hard price floor of ₹42/parcel; never offer below this rate"]) is not None)
 check("scrub keeps the clean sentences", N._scrub_copied(leaked_msg, [LEAK]).startswith("Reliability is important")
       and N.copied_coaching(N._scrub_copied(leaked_msg, [LEAK]), [LEAK]) is None)
-check("preset decisions are caught when parroted (reveal check, and the copy check for 'close the deal')",
+check("preset decisions are caught when parroted (the reveal check; too short for the 7-word copy check)",
       N.revealed_instructions("We hold the price; if they don't agree, we go.")
-      and N.copied_coaching("Let's close the deal no matter what it takes.", ["Close the deal no matter what"]))
+      and N.revealed_instructions("Let's close the deal no matter what it takes."))
 check("scrub of a pure quote -> empty", N._scrub_copied(LEAK, [LEAK]) == "")
 
 # ================================================================ 3. Neha's prompt + turn

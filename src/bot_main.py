@@ -142,7 +142,8 @@ SALES_WELCOME = (
     "• /floor 43 sets a minimum price Arjun cannot go below.\n"
     "• ✅ means Arjun applied your guidance. 🛑 means an offer below your floor was stopped before Neha saw it.\n"
     "• 🙋 means Arjun is stuck and needs your decision. The negotiation holds until you answer; "
-    "he follows your answer exactly.\n\n"
+    "he follows your answer exactly.\n"
+    "• Arjun never closes a deal or walks away on his own: he asks you to sign off first (✅ / ❌).\n\n"
     "When the negotiation ends you receive a deal report: terms, revenue, margin, missed upside and the "
     "lessons Arjun keeps for next time.\n\n"
     "First time? Add Arjun and Neha to your Boardroom group, and open a personal DM with Neha to coach "
@@ -155,7 +156,12 @@ PROC_WELCOME = (
     "How it works\n"
     "• Type guidance here at any time, for example \"Threaten to move the volume to another carrier\" or "
     "\"Never accept above ₹42\". Limits apply immediately; tactics are used when the topic comes up.\n"
-    "• ✅ means I applied your guidance. SwiftRoute never sees what you send here.\n\n"
+    "• /ceiling 41 sets a maximum price I cannot go above. /end_negotiation closes the negotiation.\n"
+    "• ✅ means I applied your guidance. 🛑 means an offer above your limit was stopped before SwiftRoute "
+    "saw it. SwiftRoute never sees what you send here.\n"
+    "• 🙋 means I'm stuck and need your decision. The negotiation holds until you answer; I follow your "
+    "answer exactly.\n"
+    "• I never close a deal or walk away on my own: I ask you to sign off first (✅ / ❌).\n\n"
     "When the negotiation ends I'll send you one report here: the agreed terms, savings against our current "
     "vendor, how the deal compares with our target and walk-away price, open items and the lessons I keep "
     "for next time."
@@ -197,6 +203,8 @@ PROC_WAR_ROOM_COMMANDS = [
     BotCommand("status", "Progress and your guidance"),
     BotCommand("pause", "Pause the negotiation"),
     BotCommand("resume", "Resume the negotiation"),
+    BotCommand("ceiling", "Set a maximum price, e.g. /ceiling 41"),
+    BotCommand("end_negotiation", "Close the current negotiation"),
     BotCommand("clear", "Clear all messages in this chat"),
 ]
 
@@ -218,6 +226,41 @@ PROC_DM_MENU = _keyboard([("📊 Status", "menu:status"), ("🧹 Clear chat", "m
 CONFIRM_CLEAR_MENU = _keyboard([("🧹 Yes, clear chat", "clear:yes"), ("Cancel", "clear:no")])
 ESCALATION_MENU = _keyboard([("✅ Close the deal no matter what", "esc:close")],
                             [("🛑 Hold the price, walk away if they refuse", "esc:hold")])
+
+# Executive Sign-Off Gate (2026-10-31): no agent closes or walks away on its own. A draft that accepts the deal
+# ("deal_closed") or walks away ("walk_away") is held, nothing reaches the Boardroom, and that side's War Room
+# must authorize it. A manager decision that already ordered it ("Close the deal no matter what" / "Hold..., walk
+# away if they refuse") is that authorization. ❌ becomes a manager decision the agent rewrites under.
+SIGNOFF_AUTO_APPROVE = False  # True only where nobody can sign: headless benchmarks / shadow tests, legacy tests
+SIGN_APPROVED = "✅ Authorized"
+SIGN_REJECTS = {"deal": "Do not sign at these terms. Reject them and make a counter-offer within your limits.",
+                "walk": "Do not walk away. Stay in the negotiation and keep negotiating within your limits."}
+SIGN_MENUS = {"deal": _keyboard([("✅ Authorize Signature", "sign:ok")], [("❌ Reject & Counter", "sign:no")]),
+              "walk": _keyboard([("✅ Authorize Walk-Away", "sign:ok")], [("❌ Override & Continue", "sign:no")])}
+_SIGN_FOOT = ("Nothing reaches the Boardroom until you answer. Tap an option, or type an instruction here "
+              "(it counts as ❌ with your instruction).")
+SIGN_DMS = {
+    ("sales", "deal"): "🙋 Sign-off needed\n\nArjun intends to close at {terms}.\n\nHis message to Neha: “{draft}”\n\n"
+                       "✅ Authorize Signature / ❌ Reject & Counter\n" + _SIGN_FOOT,
+    ("sales", "walk"): "🙋 Sign-off needed\n\nArjun intends to walk away.\n\nHis message to Neha: “{draft}”\n\n"
+                       "✅ Authorize Walk-Away / ❌ Override & Continue\n" + _SIGN_FOOT,
+    ("procurement", "deal"): "🙋 Sign-off needed\n\nI intend to close at {terms}.\n\nMy message to Arjun: “{draft}”\n\n"
+                             "✅ Authorize Signature / ❌ Reject & Counter\n" + _SIGN_FOOT,
+    ("procurement", "walk"): "🙋 Sign-off needed\n\nI intend to walk away.\n\nMy message to Arjun: “{draft}”\n\n"
+                             "✅ Authorize Walk-Away / ❌ Override & Continue\n" + _SIGN_FOOT,
+}
+SIGN_ACKS = {
+    ("sales", "deal", True): "✅ Signature authorized. Arjun confirms the deal now.",
+    ("sales", "deal", False): "❌ Rejected. Arjun will counter instead of signing.",
+    ("sales", "walk", True): "✅ Walk-away authorized. Arjun ends the negotiation now.",
+    ("sales", "walk", False): "❌ Overridden. Arjun stays in the negotiation.",
+    ("procurement", "deal", True): "✅ Signature authorized. I'll confirm the deal now.",
+    ("procurement", "deal", False): "❌ Rejected. I'll counter instead of signing.",
+    ("procurement", "walk", True): "✅ Walk-away authorized. I'll end the negotiation now.",
+    ("procurement", "walk", False): "❌ Overridden. I'll stay in the negotiation.",
+}
+SIGN_TIMEOUT_DMS = {"sales": "No sign-off came in, so Arjun did not go ahead. He keeps negotiating within your limits.",
+                    "procurement": "No sign-off came in, so I did not go ahead. I'm continuing within our mandate."}
 STATUS_LABELS = {
     "AWAITING_PROCUREMENT": "🟢 In progress: Neha is responding",
     "AWAITING_SALES": "🟢 In progress: Arjun is responding",
@@ -287,6 +330,8 @@ def new_match(sales_war_room_chat_id: int, mandate: dict, sales_ammo: list[dict]
         "sales_friction_points": [],
         # Coach's /floor price (₹/parcel) for this match; the CPQ guard enforces it like the rate-card floor.
         "coach_floor": None,
+        # Coach's /ceiling price for Neha (Procurement War Room); her guard enforces it like her walk-away price.
+        "coach_ceiling": None,
         "sales_war_room_chat_id": sales_war_room_chat_id,
         "procurement_war_room_chat_id": None,
         "end_code": None,             # deal | walkaway | coach | cap | error
@@ -297,6 +342,8 @@ def new_match(sales_war_room_chat_id: int, mandate: dict, sales_ammo: list[dict]
         "rto_offered": False,
         "blocked_count": 0,           # drafts stopped by the price check
         "playbook_topics": set(),     # topic tags of past lessons used
+        "procurement_blocked_count": 0,         # Neha's drafts stopped by her price check
+        "procurement_playbook_topics": set(),   # topic tags of Neha's past lessons used
         # Two-way escalation (status "AWAITING_MANAGER_APPROVAL" while Arjun waits for an answer).
         "escalations": [],            # {"question": str, "decision": str | None} per escalation
         "manager_overrides": [],      # decisions, injected as Absolute Override Commands for the rest of the match
@@ -318,6 +365,9 @@ def new_match(sales_war_room_chat_id: int, mandate: dict, sales_ammo: list[dict]
         "procurement_escalation_cooldown": False,
         "procurement_deadlock_baseline": 0,     # index into procurement_offers where deadlock measuring restarts
         "procurement_posts_since_decision": None,
+        # Executive Sign-Off Gate: the kind being signed now ("deal" | "walk" | None), and every request per side.
+        "signoff": None,
+        "signoffs": {"sales": [], "procurement": []},  # {"kind", "terms", "approved", "decision"?}
     }
 
 
@@ -707,9 +757,9 @@ def walk_block(match: dict, lessons: list[dict], tried: set[str]) -> str | None:
     "meets": the buyer's latest rate meets his price. He is asked to close instead, once per price
       position: bench 2026-10-27 looped to the message cap when the note came back every turn while the
       open issue was payment terms that his CRITICAL lesson and the manager had both refused;
-    "unauthorised": no manager decision and no CRITICAL lesson in play;
     "premature": after "Hold ..., if they don't agree, walk away" he must state final terms first.
-    (No "small gap" close: the coach dropped it on 2026-10-27, a ₹1 gap is millions over a contract.)
+    Any other walk-away goes to the Executive Sign-Off Gate (2026-10-31; a CRITICAL lesson no longer authorizes
+    it alone). (No "small gap" close: the coach dropped it on 2026-10-27, a ₹1 gap is millions over a contract.)
     """
     if "meets" not in tried and buyer_position(match)[1] and meets_key(match) not in match.get("meets_noted", ()):
         if payment_gap(match):
@@ -720,8 +770,6 @@ def walk_block(match: dict, lessons: list[dict], tried: set[str]) -> str | None:
         else:
             return "meets"
     overrides = match["manager_overrides"]
-    if not (overrides or any(h.get("is_critical") for h in lessons)):
-        return "unauthorised"
     if overrides and match["sales_posts_since_decision"] == 0 and is_conditional_walk(overrides[-1]):
         return "premature"
     return None
@@ -733,25 +781,104 @@ def walk_rewrite_note(match: dict, reason: str) -> str:
         return negotiation.BUYER_MEETS_PRICE_LINE.format(
             buyer=negotiation.fmt_rate(buyer_position(match)[0]),
             yours=negotiation.fmt_rate(arjun_rate_for_buyer_term(match)))
-    if reason == "premature":
-        return negotiation.FINAL_TERMS_FIRST_LINE
-    return negotiation.WALK_NOT_AUTHORISED_LINE
-
-
-def walk_question(match: dict) -> str:
-    """Arjun wants to walk away without authority: ask the manager instead (his goodbye is not posted)."""
-    last = next((t["text"] for t in reversed(match["transcript"]) if t["role"] == "procurement"), "")
-    quote = f" Neha's latest: “{last[:220]}{'…' if len(last) > 220 else ''}”" if last else ""
-    facts = deadlock_facts(match, first_person=True)
-    why = f" {facts[0].upper()}{facts[1:]}." if facts else ""
-    return (f"I'm ready to walk away from this negotiation, but I need your OK first.{why}{quote} "
-            "Should I close the deal no matter what, or hold the price and walk away if she refuses?")
+    return negotiation.FINAL_TERMS_FIRST_LINE  # "premature"
 
 
 def take_decision(match: dict, decision: str) -> None:
     """Hand the manager's answer to the waiting loop."""
     match["pending_decision"] = decision.strip()
     match["decision_event"].set()
+
+
+def signoff_kind(match: dict, side: str, closing: bool, walking: bool) -> str | None:
+    """"deal" / "walk" when this draft needs the War Room's sign-off, else None. A manager decision that already
+    ordered the move ("Close the deal no matter what", or "Hold..., walk away if they refuse") is the sign-off."""
+    overrides = match[ESCALATION_KEYS[side][1]]
+    last = overrides[-1] if overrides else ""
+    if closing:
+        return None if last == DECISION_CLOSE else "deal"
+    if walking:
+        return None if is_conditional_walk(last) else "walk"
+    return None
+
+
+def deal_terms_text(match: dict, side: str, turn) -> str:
+    """The terms an agent intends to sign, for the sign-off request: "₹43/parcel · 12 months · 30-day payment terms"."""
+    price = turn.proposed_price if turn.proposed_price is not None else _last_priced(match["sales_offers"])
+    months = (getattr(turn, "contract_months", None) or _last_priced(match["sales_offer_months"])
+              or (match.get("mandate") or {}).get("contract_months"))
+    days = turn.payment_days if turn.payment_days is not None else (
+        _last_priced(match["sales_payment_days"]) if side == "sales"
+        else _last_priced(match["procurement_payment_days"]) or _last_priced(match["sales_payment_days"]))
+    parts = [f"{negotiation.fmt_rate(price)}/parcel" if price is not None else "rate not stated",
+             f"{months:g} months" if months else "term not stated",
+             f"{days}-day payment terms" if days is not None else "payment terms not stated"]
+    if getattr(turn, "offers_rto_waiver", False):
+        parts.append("RTO waiver included")
+    return " · ".join(parts)
+
+
+async def sign_off(match: dict, bot: Bot, side: str, kind: str, terms: str, draft: str) -> bool | None:
+    """Executive Sign-Off Gate: hold the Boardroom, ask that side's War Room to authorize the close / walk-away.
+
+    True = authorized (post the draft); False = rejected or no answer in time (the rejection, or the coach's typed
+    instruction, becomes a manager decision and the agent rewrites); None = the match ended while waiting.
+    Uses the escalation wait (shared decision_event) but not the agent's escalation budget. Approvals are logged
+    with post_match.SIGNOFF_PREFIX so the Judge skips them; rejections are logged like decisions, so it learns.
+    """
+    _, overrides, _, baseline, offers, posts, chat_key, resume = ESCALATION_KEYS[side]
+    asked, decided = ESCALATION_SPEAKERS[side]
+    record = {"kind": kind, "terms": terms, "approved": None}
+    match["signoffs"][side].append(record)
+    if SIGNOFF_AUTO_APPROVE:
+        record["approved"] = True
+        logger.info("Match %s: %s sign-off (%s) auto-approved.", match["match_id"], AGENT_NAMES[side], kind)
+        return True
+    match["status"] = "AWAITING_MANAGER_APPROVAL"
+    match["escalating_side"], match["signoff"] = side, kind
+    match["pending_decision"] = None
+    match["decision_event"].clear()
+    intent = f"close at {terms}" if kind == "deal" else "walk away"
+    await log_message(match["match_id"], asked,
+                      f"{post_match.SIGNOFF_PREFIX}{AGENT_NAMES[side]} intends to {intent}: “{draft}”")
+    logger.info("Match %s: %s needs sign-off to %s.", match["match_id"], AGENT_NAMES[side], intent)
+    await notify(bot, match[chat_key], SIGN_DMS[(side, kind)].format(terms=terms, draft=draft[:600]),
+                 reply_markup=SIGN_MENUS[kind])
+    try:
+        await asyncio.wait_for(match["decision_event"].wait(), timeout=APPROVAL_TIMEOUT_S)
+    except TimeoutError:
+        pass
+    if match["status"] == "ENDED":
+        return None
+    decision = match["pending_decision"]
+    match["escalating_side"] = match["signoff"] = None
+    match["status"] = resume
+    if decision == SIGN_APPROVED:
+        record["approved"] = True
+        await log_message(match["match_id"], decided, f"{post_match.SIGNOFF_PREFIX}{SIGN_APPROVED}")
+        logger.info("Match %s: %s's %s authorized.", match["match_id"], AGENT_NAMES[side], kind)
+        return True
+    record["approved"] = False
+    if not decision:  # no answer: nothing is signed and nobody walks without a human
+        await notify(bot, match[chat_key], SIGN_TIMEOUT_DMS[side])
+        decision = SIGN_REJECTS[kind]
+    record["decision"] = decision
+    match[overrides].append(decision)
+    match[posts] = 0
+    match[baseline] = len(match[offers])
+    await log_message(match["match_id"], decided, decision)
+    logger.info("Match %s: %s's %s not authorized: %s", match["match_id"], AGENT_NAMES[side], kind, decision)
+    return False
+
+
+def answer_signoff(match: dict | None, side: str, approve: bool) -> str | None:
+    """A ✅/❌ tap on a sign-off request: the line to show the coach, or None if nothing is waiting for one."""
+    if (not match or match["status"] != "AWAITING_MANAGER_APPROVAL" or not match.get("signoff")
+            or match.get("escalating_side") != side):
+        return None
+    kind = match["signoff"]
+    take_decision(match, SIGN_APPROVED if approve else SIGN_REJECTS[kind])
+    return SIGN_ACKS[(side, kind, approve)]
 
 
 async def next_turn(match: dict, side: str, generate):
@@ -813,6 +940,7 @@ async def run_match(group_id: int, sales_bot: Bot, proc_bot: Bot) -> None:
                         seller_closing=match.get("seller_closing", False),
                         overrides=match["procurement_overrides"], escalations_left=p_left,
                         manager=COACH_NAME or "your manager", deadlock=p_deadlock, must_escalate=p_must,
+                        coach_ceiling=match["coach_ceiling"], seller_rate=_last_priced(match["sales_offers"]),
                     )
 
                 turn = await next_turn(match, "procurement", generate_procurement)
@@ -836,6 +964,15 @@ async def run_match(group_id: int, sales_bot: Bot, proc_bot: Bot) -> None:
                     # counts after SwiftRoute has answered them.
                     logger.info("Match %s: Neha's walk-away ignored: final terms come first.", match["match_id"])
                     turn.outcome = None
+                if gate := signoff_kind(match, "procurement", turn.outcome == "deal closed",
+                                        turn.outcome == "buyer walked away"):
+                    # Executive Sign-Off Gate: her close / walk-away waits for the Procurement War Room.
+                    approved = await sign_off(match, proc_bot, "procurement", gate,
+                                              deal_terms_text(match, "procurement", turn), turn.text)
+                    if approved is None:
+                        return  # the match ended while waiting
+                    if not approved:
+                        continue  # she rewrites under the rejection (now a manager decision)
                 heuristics = lessons
                 await post(match, group_id, proc_bot, "procurement", turn.text)
                 match["procurement_friction_points"] = turn.friction_points
@@ -844,6 +981,12 @@ async def run_match(group_id: int, sales_bot: Bot, proc_bot: Bot) -> None:
                 # Neha's private reasoning stays in the server log; her boss gets one report at the end.
                 logger.info("Procurement note: %s | tags: %s | lessons used: %s", turn.internal_note,
                             turn.friction_points, [h["topic_tag"] for h in heuristics])
+                # Facts for her report, and live coaching signals, as for Arjun: what was stopped (🛑).
+                match["procurement_playbook_topics"].update(h["topic_tag"] for h in heuristics)
+                match["procurement_blocked_count"] += sum(
+                    getattr(v, "note", "") not in ("", negotiation.PROCUREMENT_COPY_NOTE) for v in turn.blocked)
+                for coach_note in turn.coach_notes:
+                    await notify(proc_bot, match["procurement_war_room_chat_id"], f"🛑 {coach_note}")
                 await apply_executed(match, "procurement", turn.executed_ids, proc_bot,
                                      match["procurement_war_room_chat_id"])
                 if turn.outcome == "buyer walked away":
@@ -895,10 +1038,6 @@ async def run_match(group_id: int, sales_bot: Bot, proc_bot: Bot) -> None:
                     reason = walk_block(match, lessons, tried)
                     if reason is None:
                         break
-                    if reason == "unauthorised" and escalations_left(match) > 0:
-                        logger.info("Match %s: walk-away needs the manager (%s); asking.", match["match_id"], reason)
-                        turn.escalation = walk_question(match)
-                        break
                     if reason in tried:  # still walking: post it, the walk does not count
                         logger.warning("Match %s: Sales walk_away ignored after a rewrite (%s).",
                                        match["match_id"], reason)
@@ -923,6 +1062,14 @@ async def run_match(group_id: int, sales_bot: Bot, proc_bot: Bot) -> None:
                     if not await escalate(match, sales_bot, turn.escalation):
                         return  # the match ended while waiting
                     continue      # Arjun now writes his Boardroom reply under the decision
+                if gate := signoff_kind(match, "sales", turn.deal_closed, turn.walk_away):
+                    # Executive Sign-Off Gate: his close / walk-away waits for the Sales War Room; nothing posted yet.
+                    approved = await sign_off(match, sales_bot, "sales", gate,
+                                              deal_terms_text(match, "sales", turn), turn.text)
+                    if approved is None:
+                        return  # the match ended while waiting
+                    if not approved:
+                        continue  # he rewrites under the rejection (now a manager decision)
                 match["escalation_cooldown"] = False
                 buyer_accepted = match["buyer_closing"]  # Neha's last message accepted and asked to close
                 match["buyer_closing"] = False
@@ -1100,7 +1247,8 @@ async def can_message(bot: Bot, chat_id: int) -> bool:
 async def close_negotiation(context: ContextTypes.DEFAULT_TYPE, chat) -> str | None:
     """Close the negotiation this chat belongs to. Returns a line for the person who asked, if any."""
     private = chat.type == ChatType.PRIVATE
-    group_id = war_room_to_group.get(chat.id) if private else chat.id
+    # From a DM: the negotiation that War Room belongs to (Sales bot DM -> Arjun's, Procurement bot DM -> Neha's).
+    group_id = WHISPER_ROUTES[side_of(context)][0].get(chat.id) if private else chat.id
     match = active_matches.get(group_id)
     if not match or match["status"] == "ENDED":
         return "There's no negotiation in progress."
@@ -1253,6 +1401,47 @@ async def set_floor(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+CEILING_USAGE = ("Usage: /ceiling 41 to block any price above ₹41/parcel this negotiation, or /ceiling off to "
+                 "clear it.")
+
+
+async def set_ceiling(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/ceiling <price> in the Procurement War Room: a hard maximum price for Neha this match (mirror of /floor)."""
+    match = active_matches.get(proc_war_room_to_group.get(update.effective_chat.id))
+    if not match or match["status"] == "ENDED":
+        await update.message.reply_text(
+            "There's no live negotiation. Tap Start negotiation in the Boardroom group to begin."
+        )
+        return
+
+    arg = " ".join(context.args or []).strip()
+    if not arg:
+        current = match["coach_ceiling"]
+        status = f"Current ceiling: ₹{current:g}/parcel." if current is not None else "No ceiling set."
+        await update.message.reply_text(f"{status}\n{CEILING_USAGE}")
+        return
+    if arg.lower() in ("off", "clear", "none", "remove"):
+        match["coach_ceiling"] = None
+        match["coaching_rev"]["procurement"] += 1
+        await update.message.reply_text("🔓 Ceiling removed. Our walk-away price still applies.")
+        return
+    value = parse_price(arg)
+    if value is None:
+        await update.message.reply_text(CEILING_USAGE)
+        return
+
+    match["coach_ceiling"] = value
+    match["coaching_rev"]["procurement"] += 1
+    # Logged as a whisper so the Judge can learn from it like any other coaching.
+    await log_message(match["match_id"], "Procure_Whisper",
+                      f"Hard price ceiling for this negotiation: never accept above ₹{value:g}/parcel.")
+    await update.message.reply_text(
+        f"🔒 Ceiling set to ₹{value:g}/parcel for this negotiation. I won't offer or accept anything higher: "
+        "any such draft is stopped (🛑) before SwiftRoute sees it. If this is above our walk-away price, "
+        "the walk-away price still applies."
+    )
+
+
 async def show_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await respond(update, context, status_text(update.effective_chat))
 
@@ -1289,9 +1478,16 @@ def status_text(chat, side: str = "sales") -> str:
         lines += [f"  • {text}" for text in standing]
         if side == "sales" and match["coach_floor"] is not None:
             lines.append(f"🔒 Your floor: {negotiation.fmt_rate(match['coach_floor'])}/parcel")
+        if side == "procurement" and match.get("coach_ceiling") is not None:
+            lines.append(f"🔒 Your ceiling: {negotiation.fmt_rate(match['coach_ceiling'])}/parcel")
         escalations, overrides = ESCALATION_KEYS[side][:2]
-        if (match["status"] == "AWAITING_MANAGER_APPROVAL" and (match.get("escalating_side") or "sales") == side
-                and match[escalations]):
+        waiting_here = (match["status"] == "AWAITING_MANAGER_APPROVAL"
+                        and (match.get("escalating_side") or "sales") == side)
+        if waiting_here and match.get("signoff"):
+            pending = match["signoffs"][side][-1]
+            what = f"close at {pending['terms']}" if pending["kind"] == "deal" else "walk away"
+            lines.append(f"\n🙋 Waiting for your sign-off: {AGENT_NAMES[side]} intends to {what}.")
+        elif waiting_here and match[escalations]:
             who = "Arjun is" if side == "sales" else "I'm"
             lines.append(f"\n🙋 {who} waiting for your decision:\n{match[escalations][-1]['question']}")
         if match[overrides]:
@@ -1413,6 +1609,14 @@ async def sales_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         take_decision(match, decision)
         await query.answer("Decision sent.")
         await notify(context.bot, chat.id, DECISION_ACK.format(decision=decision))
+    elif data in ("sign:ok", "sign:no"):
+        line = answer_signoff(active_matches.get(war_room_to_group.get(chat.id)) if private else None,
+                              "sales", data == "sign:ok")
+        if line is None:
+            await query.answer("Nothing is waiting for your sign-off right now.", show_alert=True)
+            return
+        await query.answer("Sent.")
+        await notify(context.bot, chat.id, line)
     elif data in ("menu:pause", "menu:resume"):
         paused = data == "menu:pause"
         problem = await set_paused(context, chat, paused)
@@ -1481,6 +1685,14 @@ async def proc_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         take_decision(match, decision)
         await query.answer("Decision sent.")
         await notify(context.bot, query.message.chat.id, DECISION_ACKS["procurement"].format(decision=decision))
+    elif query.data in ("sign:ok", "sign:no"):
+        line = answer_signoff(active_matches.get(proc_war_room_to_group.get(query.message.chat.id)),
+                              "procurement", query.data == "sign:ok")
+        if line is None:
+            await query.answer("Nothing is waiting for your sign-off right now.", show_alert=True)
+            return
+        await query.answer("Sent.")
+        await notify(context.bot, query.message.chat.id, line)
     elif query.data == "menu:status":
         await query.answer()
         await notify(context.bot, query.message.chat.id, status_text(query.message.chat, side="procurement"))
@@ -1552,6 +1764,8 @@ def build_apps() -> tuple[Application, Application]:
     proc.add_handler(CommandHandler("pause", pause_match, filters=private))
     proc.add_handler(CommandHandler("resume", resume_match, filters=private))
     proc.add_handler(CommandHandler(["clear", "reset"], ask_clear, filters=private))
+    proc.add_handler(CommandHandler("ceiling", set_ceiling, filters=private))
+    proc.add_handler(CommandHandler(["end_negotiation", "end_match"], end_match, filters=private))
     proc.add_handler(CallbackQueryHandler(proc_buttons))
     proc.add_handler(MessageHandler(
         private & filters.UpdateType.MESSAGE & filters.TEXT & ~filters.COMMAND, buffer_proc_whisper
@@ -1597,6 +1811,8 @@ async def initialize_with_retry(apps: tuple[Application, Application]) -> None:
 #   {"cmd": "start", "boardroom": -100..., "coach": 123, "neha_note": "...", "arjun_note": "..."}
 #   {"cmd": "whisper", "side": "sales" | "procurement", "text": "..."}
 #   {"cmd": "decision", "text": "..."}     (answers whichever agent is waiting: Arjun or Neha)
+#   {"cmd": "floor", "price": 43} / {"cmd": "ceiling", "price": 41}   (/floor, /ceiling; also "arjun_floor" / "neha_ceiling" in start)
+#   {"cmd": "sign", "approve": true}   (answers a 🙋 sign-off request: ✅ / ❌)
 #   {"cmd": "end"}
 #   {"cmd": "lesson", "id": 3, "approve": true, "coach": 123}   (answers a 🧠 playbook proposal)
 CONTROL_DIR = Path(__file__).resolve().parent.parent / "data" / "control"
@@ -1618,6 +1834,21 @@ async def _control_note(match: dict, side: str, text: str, sales_bot: Bot, proc_
     await notify(bot, chat_id, f"🧪 Test note sent on your behalf: “{text}”\n{WHISPER_ACK[side]}")
 
 
+async def _control_limit(match: dict, kind: str, price: float, sales_bot: Bot, proc_bot: Bot) -> None:
+    """The same as typing /floor (Sales War Room) or /ceiling (Procurement War Room), echoed into that DM.
+    A start-of-match limit, like a start note, is a briefing: logged with the setup prefix so it is never judged."""
+    side, key, speaker = (("sales", "coach_floor", "Human_Whisper") if kind == "floor"
+                          else ("procurement", "coach_ceiling", "Procure_Whisper"))
+    match[key] = price
+    match["coaching_rev"][side] += 1
+    text = (f"Hard price floor for this negotiation: never offer below ₹{price:g}/parcel." if kind == "floor"
+            else f"Hard price ceiling for this negotiation: never accept above ₹{price:g}/parcel.")
+    await log_message(match["match_id"], speaker, f"{post_match.SETUP_NOTE_PREFIX}{text}")
+    bot, chat_id = ((sales_bot, match["sales_war_room_chat_id"]) if side == "sales"
+                    else (proc_bot, match["procurement_war_room_chat_id"]))
+    await notify(bot, chat_id, f"🧪 Test command sent on your behalf: /{kind} {price:g}\n🔒 {text}")
+
+
 async def run_control_command(cmd: dict, sales_app: Application) -> None:
     sales_bot, proc_bot = sales_app.bot_data["sales_bot"], sales_app.bot_data["proc_bot"]
     kind = cmd.get("cmd")
@@ -1637,11 +1868,25 @@ async def run_control_command(cmd: dict, sales_app: Application) -> None:
         for side, key in (("procurement", "neha_note"), ("sales", "arjun_note")):
             if cmd.get(key):
                 await _control_note(match, side, cmd[key], sales_bot, proc_bot, setup=True)  # match brief
+        for kind, key in (("floor", "arjun_floor"), ("ceiling", "neha_ceiling")):
+            if cmd.get(key) is not None:
+                await _control_limit(match, kind, float(cmd[key]), sales_bot, proc_bot)
         logger.info("Test control: started match %s", match["match_id"])
         return
     group_id, match = _live_match()
     if match is None:
         logger.warning("Test control: no live match for %s", cmd)
+    elif kind == "sign":  # {"cmd": "sign", "approve": true}: same as tapping ✅ / ❌ on a sign-off request
+        side = match.get("escalating_side") or "sales"
+        line = answer_signoff(match, side, bool(cmd.get("approve")))
+        if line is None:
+            logger.warning("Test control: sign sent but no sign-off is waiting")
+            return
+        bot, chat_id = ((sales_bot, match["sales_war_room_chat_id"]) if side == "sales"
+                        else (proc_bot, match["procurement_war_room_chat_id"]))
+        await notify(bot, chat_id, f"🧪 Test answer sent on your behalf.\n{line}")
+    elif kind in ("floor", "ceiling"):  # {"cmd": "floor", "price": 43} / {"cmd": "ceiling", "price": 41}
+        await _control_limit(match, kind, float(cmd["price"]), sales_bot, proc_bot)
     elif kind == "whisper":
         await _control_note(match, cmd["side"], cmd["text"], sales_bot, proc_bot)
     elif kind == "decision":
@@ -1660,13 +1905,29 @@ async def run_control_command(cmd: dict, sales_app: Application) -> None:
         logger.warning("Test control: unknown command %s", cmd)
 
 
+CONTROL_READ_RETRIES = 5    # live 10-31: a file read while the tester was still writing it was empty (EOF error)
+CONTROL_READ_DELAY_S = 0.1
+
+
+async def _read_control_file(path: Path) -> dict:
+    """A control command, read only once it parses: a half-written file is retried after a short wait."""
+    for attempt in range(1, CONTROL_READ_RETRIES + 1):
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except ValueError:
+            if attempt == CONTROL_READ_RETRIES:
+                raise
+            await asyncio.sleep(CONTROL_READ_DELAY_S)
+    raise AssertionError("unreachable")
+
+
 async def control_inbox(sales_app: Application) -> None:
     CONTROL_DIR.mkdir(parents=True, exist_ok=True)
     logger.info("Test control ON: watching %s", CONTROL_DIR)
     while True:
         for path in sorted(CONTROL_DIR.glob("*.json")):
             try:
-                cmd = json.loads(path.read_text(encoding="utf-8"))
+                cmd = await _read_control_file(path)
                 path.unlink()
                 logger.info("Test control: %s", cmd.get("cmd"))
                 await run_control_command(cmd, sales_app)

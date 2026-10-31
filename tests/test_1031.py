@@ -26,6 +26,7 @@ shutil.copy(HERE / "zeroleak_backup_before_1030_failure_tests.db", TEST_DB)  # 5
 db_init.DB_PATH = TEST_DB
 
 import bot_main as B  # noqa: E402
+B.SIGNOFF_AUTO_APPROVE = True  # these suites test other features; the sign-off gate has its own tests
 import llm_engine  # noqa: E402
 import negotiation as N  # noqa: E402
 import post_match as P  # noqa: E402

@@ -162,12 +162,16 @@ wd_calls = [p for p, s in PROMPTS if s in P.WATCHDOG_SYSTEM.values()]
 check("watchdog: reads every message the agent wrote, and only his",
       len(wd_calls) == 1 and SLIP in wd_calls[0] and "₹43/parcel on 12 months." in wd_calls[0]
       and "₹41 or we walk." not in wd_calls[0], wd_calls)
+check("InfoSec watchdog: the Judge gets his classified limits to spot a leak",
+      "CLASSIFIED LIMITS" in wd_calls[0] and "rate-card floor ₹" in wd_calls[0]
+      and "InfoSec Watchdog" in P.WATCHDOG_SYSTEM["sales"] and "InfoSec Watchdog" in P.WATCHDOG_SYSTEM["procurement"],
+      wd_calls[0][-200:])
 row = run(db_init.fetch_pending(o.heuristic_id)) if o else {}
-check("watchdog: staged for approval, NOT critical (critical lessons authorise walk-aways), slip shown as source",
-      row and row["status"] == "pending" and row["is_critical"] == 0 and SLIP in row["source_note"]
+check("watchdog: staged for approval as CRITICAL (InfoSec, 10-31), slip shown as source",
+      row and row["status"] == "pending" and row["is_critical"] == 1 and SLIP in row["source_note"]
       and live("Communication_Tone") is None, row)
 check("watchdog: no 'unchanged' alert sent mid-debrief (the approval request follows the shadow test)", not sent, sent)
-check("watchdog: report labels it", any("fourth-wall watchdog" in line for line in reports._lesson_lines(outs, "sales")))
+check("watchdog: report labels it", any("InfoSec watchdog" in line for line in reports._lesson_lines(outs, "sales")))
 run(db_init.resolve_pending(o.heuristic_id, False))
 SCRIPT.clear(); PROMPTS.clear()
 ledger("t30_wd_clean", [("Sales_Agent", "₹43/parcel; our dedicated account manager handles prompt payment queries.")])
@@ -343,7 +347,7 @@ m = match_state(60, 30)
 check("payment_gap 60 vs 30", B.payment_gap(m) == "60 vs 30 days")
 check("meets price + wants 60 days, CRITICAL in play -> walk honoured (no close nudge)",
       B.walk_block(m, crit, set()) is None, B.walk_block(m, crit, set()))
-check("meets price + wants 60 days, no CRITICAL -> ask the manager", B.walk_block(m, [], set()) == "unauthorised")
+check("meets price + wants 60 days -> no close nudge; the walk goes to the sign-off gate", B.walk_block(m, [], set()) is None)
 m = match_state(30, 30)
 check("meets price, same payment terms -> close nudge kept", B.walk_block(m, crit, set()) == "meets")
 m = match_state(None, 30)

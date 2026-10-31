@@ -23,6 +23,7 @@ shutil.copy(SCRATCH / "zeroleak_backup_at_restart.db", TEST_DB)  # Phase-6 schem
 db_init.DB_PATH = TEST_DB
 
 import bot_main as B  # noqa: E402
+B.SIGNOFF_AUTO_APPROVE = True  # these suites test other features; the sign-off gate has its own tests
 import llm_engine  # noqa: E402
 import negotiation as N  # noqa: E402
 import post_match  # noqa: E402
@@ -131,6 +132,14 @@ async def new():
     return m
 
 
+async def auto_sign(m, walks=False):
+    """A coach who signs every close and refuses every walk-away (unless `walks`) at the sign-off gate."""
+    while m["status"] != "ENDED":
+        if m.get("signoff") and m["status"] == "AWAITING_MANAGER_APPROVAL":
+            B.answer_signoff(m, m["escalating_side"], m["signoff"] == "deal" or walks)
+        await asyncio.sleep(0.005)
+
+
 def boardroom(match_bot_list=(sales_bot, proc_bot)):
     return [t for b in match_bot_list for c, t, _ in b.sent if c == GROUP]
 
@@ -173,7 +182,8 @@ async def main():
     # Since 2026-10-26 only the fourth-wall reminder comes after the override block.
     check("override block is last in the prompt (before the fourth-wall reminder)",
           s_ovr.rstrip().endswith(N.FOURTH_WALL_REMINDER)
-          and s_ovr.rstrip()[:-len(N.FOURTH_WALL_REMINDER)].rstrip().endswith("already decided."))
+          and s_ovr.rstrip()[:-len(N.FOURTH_WALL_REMINDER)].rstrip().endswith(
+              "already decided.\n</NON_NEGOTIABLE_CONSTRAINTS>"))
     for name, s in (("plain", s_none), ("escalation", s_esc), ("override", s_ovr)):
         check(f"fourth-wall rule verbatim in hard limits ({name})",
               "- NEVER break the fourth wall. NEVER use phrases like 'per our playbook', 'according to my manager', "
@@ -276,7 +286,7 @@ async def main():
     await wait_for(lambda: loop.done(), 3)
     sys_prompt = [s for a, p, s in CALLS if a == "sales"][0]
     check("next match: CRITICAL lesson in Arjun's prompt",
-          "CRITICAL (a deadlock your manager had to break" in sys_prompt and "₹43 as final" in sys_prompt)
+          "CRITICAL (a standing ruling from your manager" in sys_prompt and "₹43 as final" in sys_prompt)
     check("deal closed by Neha", m["end_code"] == "deal")
     await asyncio.gather(*list(B.judge_tasks))
 
@@ -345,7 +355,7 @@ async def main():
     loop = asyncio.create_task(B.run_match(GROUP, sales_bot, proc_bot))
     B.match_tasks[GROUP] = loop
     await wait_for(lambda: loop.done(), 3)
-    check("unauthorised walk-away ignored (match continues)", m["end_code"] == "deal")
+    check("walk-away with no decision -> sign-off gate (auto-approved in this suite) -> ends", m["end_code"] == "sales_walkaway")
     await asyncio.gather(*list(B.judge_tasks))
 
     # ======================================================== a CRITICAL lesson in play authorises walking away
@@ -462,55 +472,78 @@ async def main():
     with sqlite3.connect(TEST_DB) as c:
         c.execute("UPDATE sales_heuristics SET is_critical = 0")
 
-    # Fix 1: unauthorised walk-away -> the manager is asked; the goodbye is never posted
+    # Executive Sign-Off Gate (10-31; replaces "unauthorised walk -> ask the manager"): no walk-away or close
+    # reaches the Boardroom before that side's War Room authorizes it.
     reset()
+    B.SIGNOFF_AUTO_APPROVE = False
     m = await new()
-    SCRIPT["procurement"] = [proc("a"), proc("b"), proc("c")]
-    SCRIPT["sales"] = [sales("x"), sales("y"), sales("Goodbye, we are walking away.", 43, walk_away=True)]
+    SCRIPT["procurement"] = [proc("a"), proc("₹43/parcel, 12 months, 30 days. Deal.", deal_closed=True)]
+    SCRIPT["sales"] = [sales("Goodbye, we are walking away.", 43, walk_away=True),
+                       sales("₹43/parcel, 12 months, 30 days is where we are.", 43),
+                       sales("Confirmed: ₹43/parcel, 12 months, 30 days. We have a deal.", 43, deal_closed=True)]
     SCRIPT["judge"] = list(SPARE_JUDGE)
     loop = asyncio.create_task(B.run_match(GROUP, sales_bot, proc_bot))
     B.match_tasks[GROUP] = loop
-    ok = await wait_for(lambda: m["status"] == "AWAITING_MANAGER_APPROVAL")
-    q = m["escalations"][0]["question"] if m["escalations"] else ""
-    check("fix1: unauthorised walk-away becomes an escalation", ok and q.startswith("I'm ready to walk away"), q)
-    check("fix1: the goodbye was not posted", not any("Goodbye" in t for t in boardroom()))
-    check("fix1: escalation DM sent", await wait_for(
-        lambda: any("I'm ready to walk away" in t for c, t, _ in sales_bot.sent if c == COACH)))
+    ok = await wait_for(lambda: m.get("signoff") == "walk"
+                        and any("Sign-off needed" in t for c, t, _ in sales_bot.sent if c == COACH))
+    req = [(t, mk) for c, t, mk in sales_bot.sent if c == COACH and "Sign-off needed" in t]
+    check("gate: Arjun's walk-away (no decision) -> sign-off request, nothing posted",
+          ok and m["status"] == "AWAITING_MANAGER_APPROVAL" and not any("Goodbye" in t for t in boardroom())
+          and req and "Arjun intends to walk away" in req[-1][0] and req[-1][1] is B.SIGN_MENUS["walk"],
+          (ok, m["status"], m.get("signoff"), [t[:60] for c, t, _ in sales_bot.sent], boardroom()))
+    check("gate: does not use his 3 questions", m["escalations"] == [])
+    check("gate: /status shows the waiting sign-off",
+          "Waiting for your sign-off: Arjun intends to walk away" in B.status_text(SimpleNamespace(id=COACH, type="private")))
+    check("gate: ❌ Override & Continue", B.answer_signoff(m, "sales", False) == B.SIGN_ACKS[("sales", "walk", False)])
+    ok = await wait_for(lambda: m.get("signoff") == "deal" and any("I intend to close" in t for c, t, _ in proc_bot.sent))
+    check("gate: Arjun rewrote under the override, then Neha's close waits for HER War Room",
+          ok and m["escalating_side"] == "procurement" and B.SIGN_REJECTS["walk"] in m["manager_overrides"]
+          and [t["text"] for t in m["transcript"] if t["role"] == "sales"] == ["₹43/parcel, 12 months, 30 days is where we are."]
+          and any("I intend to close at ₹43/parcel · 12 months" in t for c, t, _ in proc_bot.sent), m["signoffs"])
+    check("gate: ✅ Authorize Signature (Neha)", B.answer_signoff(m, "procurement", True) is not None)
+    ok = await wait_for(lambda: m.get("signoff") == "deal" and m["escalating_side"] == "sales"
+                        and any("Arjun intends to close" in t for c, t, _ in sales_bot.sent))
+    check("gate: Arjun's confirming close waits for the Sales War Room too", ok)
+    check("gate: ✅ Authorize Signature (Arjun)", B.answer_signoff(m, "sales", True) is not None)
+    await wait_for(lambda: loop.done(), 3)
+    check("gate: both signed -> deal", m["end_code"] == "deal", m["end_code"])
+    ledger = await db_init.fetch_ledger(m["match_id"])
+    blocks = post_match.context_blocks(ledger)
+    check("gate: approvals are not lessons; the rejection is judged like a decision",
+          [(b.side, b.kind, b.text) for b in blocks] == [("sales", "escalation", B.SIGN_REJECTS["walk"])]
+          and blocks[0].question.startswith(post_match.SIGNOFF_PREFIX), [(b.side, b.text) for b in blocks])
+    check("gate: answering when nothing waits -> None", B.answer_signoff(m, "sales", True) is None)
+    await asyncio.gather(*list(B.judge_tasks))
+
+    # No answer in time: nothing is signed and nobody walks.
+    reset()
+    m = await new()
+    B.APPROVAL_TIMEOUT_S = 0.1
+    SCRIPT["procurement"] = [proc("a"), proc("b"), proc("c")] + [proc("d")] * 30
+    SCRIPT["sales"] = [sales("Goodbye.", 43, walk_away=True), sales("₹43/parcel stands.", 43),
+                       sales("Still ₹43/parcel.", 43)] + [sales("₹43/parcel.", 43)] * 30
+    SCRIPT["judge"] = list(SPARE_JUDGE)
+    loop = asyncio.create_task(B.run_match(GROUP, sales_bot, proc_bot))
+    B.match_tasks[GROUP] = loop
+    ok = await wait_for(lambda: len([t for t in m["transcript"] if t["role"] == "sales"]) >= 1)
+    check("gate timeout: treated as ❌, he stays in", ok and m["end_code"] is None
+          and [t["text"] for t in m["transcript"] if t["role"] == "sales"][0] == "₹43/parcel stands."
+          and any(B.SIGN_TIMEOUT_DMS["sales"] in t for c, t, _ in sales_bot.sent), m["signoffs"])
     await B.close_negotiation(ctx(), SimpleNamespace(id=GROUP, type="group"))
     await wait_for(lambda: loop.done(), 3)
+    B.APPROVAL_TIMEOUT_S = 60
     await asyncio.gather(*list(B.judge_tasks))
 
-    # Fix 1b: no escalation available (his 1st message) -> one rewrite with the not-authorised note
-    reset()
+    # A decision that already ordered the move is the sign-off: no second ask.
     m = await new()
-    SCRIPT["procurement"] = [proc("a"), proc("b", deal_closed=True)]
-    SCRIPT["sales"] = [sales("Bye, walking away.", None, walk_away=True), sales("₹44/parcel is where we are.", 44),
-                       sales("Confirmed: ₹44/parcel. Deal.", 44, deal_closed=True)]
-    SCRIPT["judge"] = list(SPARE_JUDGE)
-    loop = asyncio.create_task(B.run_match(GROUP, sales_bot, proc_bot))
-    B.match_tasks[GROUP] = loop
-    await wait_for(lambda: loop.done(), 3)
-    posted = [t["text"] for t in m["transcript"] if t["role"] == "sales"]
-    check("fix1b: walk rewritten, goodbye not posted", posted[:1] == ["₹44/parcel is where we are."], posted)
-    check("fix1b: rewrite prompt has the not-authorised note",
-          any(a == "sales" and N.WALK_NOT_AUTHORISED_LINE in p for a, p, s in CALLS))
-    check("fix1b: match went on to a deal", m["end_code"] == "deal", m["end_code"])
-    await asyncio.gather(*list(B.judge_tasks))
-
-    # Fix 1c: still walking after the rewrite -> posted, walk ignored, match continues
-    reset()
-    m = await new()
-    SCRIPT["procurement"] = [proc("a"), proc("b"), proc("c", deal_closed=True)]
-    SCRIPT["sales"] = [sales("Bye.", None, walk_away=True), sales("Bye again.", None, walk_away=True),
-                       sales("₹44/parcel then.", 44), sales("Confirmed. Deal.", 44, deal_closed=True)]
-    SCRIPT["judge"] = list(SPARE_JUDGE)
-    loop = asyncio.create_task(B.run_match(GROUP, sales_bot, proc_bot))
-    B.match_tasks[GROUP] = loop
-    await wait_for(lambda: loop.done(), 3)
-    posted = [t["text"] for t in m["transcript"] if t["role"] == "sales"]
-    check("fix1c: only one rewrite, then posted with the walk ignored",
-          posted[0] == "Bye again." and m["end_code"] == "deal", (posted, m["end_code"]))
-    await asyncio.gather(*list(B.judge_tasks))
+    m["manager_overrides"] = [B.DECISION_CLOSE]
+    check("gate: 'Close the deal no matter what' pre-authorizes his close",
+          B.signoff_kind(m, "sales", True, False) is None and B.signoff_kind(m, "sales", False, True) == "walk")
+    m["manager_overrides"] = [B.DECISION_HOLD]
+    check("gate: 'Hold…, walk away if they refuse' pre-authorizes his walk",
+          B.signoff_kind(m, "sales", False, True) is None and B.signoff_kind(m, "sales", True, False) == "deal")
+    m["status"] = "ENDED"
+    B.SIGNOFF_AUTO_APPROVE = True
 
     # Fix 3: the buyer meets his price -> he may not walk; rewrite tells him to close
     reset()
@@ -613,8 +646,8 @@ async def main():
     m["sales_offers"], m["sales_offer_months"], m["procurement_offers"] = [43, 42, 41], [18, 15, 15], [41]
     check("term: only longer-term offers -> no rate for her term, not 'meets'",
           B.arjun_rate_for_buyer_term(m) is None and not B.buyer_position(m)[1])
-    check("term: walk-away then needs authority (not the 'meets' close note)",
-          B.walk_block(m, [], set()) == "unauthorised", B.walk_block(m, [], set()))
+    check("term: walk-away then goes to the sign-off gate (not the 'meets' close note)",
+          B.walk_block(m, [], set()) is None, B.walk_block(m, [], set()))
     m["sales_offers"], m["sales_offer_months"] = [42, 41], [12, 15]
     check("term: compares with his latest 12-month rate (₹42), so her ₹41 does not meet it",
           B.arjun_rate_for_buyer_term(m) == 42 and not B.buyer_position(m)[1])
@@ -632,9 +665,13 @@ async def main():
                        sales("₹42/parcel for 12 months.", 42),
                        sales("Confirmed: ₹42/parcel, 12 months, 30 days. Deal.", 42, deal_closed=True)]
     SCRIPT["judge"] = list(SPARE_JUDGE)
+    B.SIGNOFF_AUTO_APPROVE = False  # the coach refuses the walk-away at the gate, signs the deal
+    coach = asyncio.create_task(auto_sign(m))
     loop = asyncio.create_task(B.run_match(GROUP, sales_bot, proc_bot))
     B.match_tasks[GROUP] = loop
     await wait_for(lambda: loop.done(), 3)
+    coach.cancel()
+    B.SIGNOFF_AUTO_APPROVE = True
     sales_prompts = [p for a, p, s in CALLS if a == "sales"]
     check("term: offer months recorded per Sales message", m["sales_offer_months"] == [15, 12, 12],
           m["sales_offer_months"])

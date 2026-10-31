@@ -171,6 +171,21 @@ def _coaching_lines(directives: list[dict]) -> list[str]:
     return [f"• Your guidance: {len(directives)} sent, {applied} applied"]
 
 
+def _signoff_lines(signoffs: list[dict], who: str) -> list[str]:
+    """One line per Executive Sign-Off request (bot_main.sign_off): what the agent wanted, and your answer."""
+    lines = []
+    for s in signoffs:
+        what = f"close at {s['terms']}" if s["kind"] == "deal" else "walk away"
+        if s["approved"]:
+            answer = "you authorized it"
+        elif s.get("decision"):
+            answer = f"you said “{escape(s['decision'])}”"
+        else:
+            answer = "no answer"
+        lines.append(f"• ✍️ {who} asked to {escape(what)}: {answer}")
+    return lines
+
+
 def _lesson_lines(outcomes: list | None, side: str) -> list[str]:
     """"Playbook changes proposed" for one side: every change waits for the coach's approval (staging gate)."""
     if outcomes is None:
@@ -192,7 +207,8 @@ def _lesson_lines(outcomes: list | None, side: str) -> list[str]:
     for topic, outs in by_topic.items():
         last = outs[-1]  # later notes on a topic fold into the same proposal
         kinds = {getattr(o, "kind", "whisper") for o in outs}
-        tag = ("critical, from your decision; " if "escalation" in kinds else "") +               ("fourth-wall watchdog; " if "watchdog" in kinds else "")
+        tag = (("critical, from your decision; " if "escalation" in kinds else "")
+               + ("critical, from the fourth-wall / InfoSec watchdog; " if "watchdog" in kinds else ""))
         notes = f", from {len(outs)} notes" if len(outs) > 1 else ""
         lines.append(f"• <b>{TOPIC_LABELS.get(topic, topic)}</b> ({tag}waiting for your OK{notes})")
         lines.append(f"   <i>Current:</i> {escape(last.previous) if last.previous else 'none (first lesson on this topic)'}")
@@ -267,11 +283,23 @@ def procurement_report(match: dict, terms: DealTerms, tiers: list[dict], judge_o
         lines += ["", f"<b>Next step:</b> {escape(terms.next_step)}"]
     directives = match.get("procurement_coaching_directives", [])
     asked = match.get("procurement_escalations", [])  # Neha's questions to the Head of Procurement
-    if directives or asked:
+    ceiling, stopped = match.get("coach_ceiling"), match.get("procurement_blocked_count")
+    topics = match.get("procurement_playbook_topics")
+    signoffs = (match.get("signoffs") or {}).get("procurement", [])
+    if directives or asked or ceiling is not None or stopped or topics or signoffs:
         lines += ["", "<b>Your guidance</b>", *(_coaching_lines(directives) if directives else [])]
     for e in asked:
         answer = f"you decided “{escape(e['decision'])}”" if e["decision"] else "no decision in time"
         lines.append(f"• 🙋 I asked you: “{escape(e['question'])}”: {answer}")
+    lines += _signoff_lines(signoffs, "I")
+    # The same coaching facts as Arjun's report (mirror, 2026-10-31).
+    if ceiling is not None:
+        lines.append(f"• Your ceiling: {fmt_rate(ceiling)}/parcel")
+    if stopped:
+        lines.append(f"• Offers stopped before SwiftRoute saw them: {stopped}")
+    if topics:
+        used = ", ".join(TOPIC_LABELS.get(t, t) for t in sorted(topics))
+        lines.append(f"• Lessons from past negotiations in play: {used}")
     if SELF_PLAY and (directives or judge_outcomes):  # Neha's learning is parked until Phase B
         lines += ["", "<b>Playbook changes proposed</b>", *_lesson_lines(judge_outcomes, "procurement")]
     elif directives:
@@ -329,6 +357,7 @@ def sales_report(match: dict, terms: DealTerms, tiers: list[dict], judge_outcome
     for e in match.get("escalations", []):  # Arjun's questions to the Head of Sales
         answer = f"you decided “{escape(e['decision'])}”" if e["decision"] else "no decision in time"
         lines.append(f"• 🙋 Arjun asked: “{escape(e['question'])}”: {answer}")
+    lines += _signoff_lines((match.get("signoffs") or {}).get("sales", []), "Arjun")
     if match.get("coach_floor") is not None:
         lines.append(f"• Your floor: {fmt_rate(match['coach_floor'])}/parcel")
     if match.get("blocked_count"):

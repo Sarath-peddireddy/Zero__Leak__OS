@@ -311,6 +311,7 @@ async def main():
 
     B.TURN_DELAY_S = (ARGS.delay, ARGS.delay)
     B.debrief = bench_debrief
+    B.SIGNOFF_AUTO_APPROVE = True  # no human signs in a benchmark / shadow run: closes and walk-aways go through
     collector = Collector()
     logging.getLogger("zeroleak").addHandler(collector)
 

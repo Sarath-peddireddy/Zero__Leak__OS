@@ -26,6 +26,7 @@ shutil.copy(HERE / "zeroleak_backup_before_1031_neha_tests.db", TEST_DB)
 db_init.DB_PATH = TEST_DB
 
 import bot_main as B  # noqa: E402
+B.SIGNOFF_AUTO_APPROVE = True  # these suites test other features; the sign-off gate has its own tests
 import llm_engine  # noqa: E402
 import negotiation as N  # noqa: E402
 import post_match as P  # noqa: E402
@@ -346,6 +347,121 @@ async def main():
           st.text == "Our system says ₹43/parcel is our floor." and not st.fell_back, st.text)
     check("no word list left in either agent's final check",
           '"backend"' not in N.PROCUREMENT_FOURTH_WALL_REMINDER and '"backend"' not in N.FOURTH_WALL_REMINDER)
+
+    # ================================================================ 10-31 symmetry: Neha's hard price limit
+    walk = mandate["walk_away_price"]
+    check("ceiling: her walk-away price, or the coach's /ceiling when lower",
+          N.effective_ceiling(mandate, None)[0] == walk and N.effective_ceiling(mandate, walk - 2)[0] == walk - 2
+          and N.effective_ceiling(mandate, walk + 2)[0] == walk)
+    p_sys, _ = N.build_procurement_system(mandate, [], coach_ceiling=walk - 2)
+    check("ceiling: a hard limit in her prompt, and her walk-away rule uses it",
+          f"accept a rate above ₹{walk - 2:g}/parcel. (Set by your manager" in p_sys
+          and f"stays above ₹{walk - 2:g}/parcel after" in p_sys)
+    check("'close no matter what' keeps her hard limit, as Arjun's does",
+          "Only your hard price limit still applies" in N.PROCUREMENT_OVERRIDE_BLOCK)
+    reset()
+    SCRIPT["procurement"] = [proc("Fine, ₹44/parcel works for us.", walk + 1), proc("₹42/parcel is our offer.", 42)]
+    t = await N.procurement_turn([], mandate, [])
+    check("Neha: offer above her walk-away -> rewritten, one 🛑 note for her coach",
+          t.text.startswith("₹42/parcel is our offer") and "Rate above your walk-away price" in CALLS[-1][1]
+          and len(t.coach_notes) == 1 and "before SwiftRoute saw it" in t.coach_notes[0], (t.text, t.coach_notes))
+    SCRIPT["procurement"] = [proc("We accept your terms.", None, deal_closed=True)] * N.MAX_PROCUREMENT_ATTEMPTS
+    t = await N.procurement_turn([], mandate, [], seller_rate=walk + 1)
+    check("Neha: accepting SwiftRoute's rate above her limit every time -> holding line, no deal",
+          t.text == N.PROCUREMENT_FALLBACK_LINE and t.outcome is None and t.fell_back and t.proposed_price is None
+          and "holding reply" in t.coach_notes[-1], (t.text, t.outcome, t.coach_notes))
+    SCRIPT["procurement"] = [proc("We accept ₹42/parcel for 12 months.", None, deal_closed=True)]
+    t = await N.procurement_turn([], mandate, [], seller_rate=42)
+    check("Neha: accepting within her limit is untouched", t.outcome == "deal closed" and not t.blocked, t)
+    SCRIPT["procurement"] = [proc("₹42/parcel.", 42), proc("₹41/parcel.", 41)]
+    t = await N.procurement_turn([], mandate, [], coach_ceiling=41)
+    check("Neha: the coach's /ceiling is enforced like her walk-away", t.text.startswith("₹41/parcel")
+          and "your ceiling of ₹41" in t.coach_notes[0], (t.text, t.coach_notes))
+
+    # /ceiling and /end_negotiation in the Procurement War Room (mirrors of /floor and the Sales DM's end)
+    reset()
+    m = await new()
+    upd = dm(PROC_COACH, "/ceiling 41")
+    await B.set_ceiling(upd, NS(args=["41"]))
+    ledger = await db_init.fetch_ledger(m["match_id"])
+    check("/ceiling 41: set, confirmed, logged for the Judge as her coaching",
+          m["coach_ceiling"] == 41 and "Ceiling set to ₹41/parcel" in upd.message.replies[-1]
+          and any(r["speaker"] == "Procure_Whisper" and "ceiling" in r["payload_text"] for r in ledger))
+    check("/status in her DM shows the ceiling",
+          "Your ceiling: ₹41/parcel" in B.status_text(NS(id=PROC_COACH, type="private"), side="procurement"))
+    upd = dm(PROC_COACH, "/ceiling off")
+    await B.set_ceiling(upd, NS(args=["off"]))
+    check("/ceiling off clears it", m["coach_ceiling"] is None and "removed" in upd.message.replies[-1])
+    m["coach_ceiling"], m["procurement_blocked_count"], m["procurement_playbook_topics"] = 41, 2, {"Price"}
+    m["end_code"] = "coach"
+    rep = reports.procurement_report(m, reports.DealTerms(), await db_init.fetch_cpq_tiers(), [])
+    check("Neha's report: ceiling, offers stopped and lessons in play, like Arjun's",
+          "Your ceiling: ₹41/parcel" in rep and "Offers stopped before SwiftRoute saw them: 2" in rep
+          and "Lessons from past negotiations in play" in rep, rep)
+    ctx = NS(application=NS(bot_data={"side": "procurement", "sales_bot": sales_bot, "proc_bot": proc_bot}),
+             bot=proc_bot)
+    reply = await B.close_negotiation(ctx, NS(id=PROC_COACH, type="private"))
+    check("/end_negotiation from the Procurement DM closes her negotiation",
+          m["status"] == "ENDED" and reply.startswith("Negotiation closed"), reply)
+    m = await new()
+    await B._control_limit(m, "floor", 43, sales_bot, proc_bot)
+    await B._control_limit(m, "ceiling", 41, sales_bot, proc_bot)
+    rows = [r for r in await db_init.fetch_ledger(m["match_id"]) if "Hard price" in r["payload_text"]]
+    check("test control floor/ceiling: set like /floor and /ceiling, logged as briefings (never judged)",
+          m["coach_floor"] == 43 and m["coach_ceiling"] == 41 and len(rows) == 2
+          and all(r["payload_text"].startswith(P.SETUP_NOTE_PREFIX) for r in rows)
+          and any("/ceiling 41" in t for c, t, _ in proc_bot.sent if c == PROC_COACH), rows)
+    check("Procurement DM menu lists /ceiling and /end_negotiation",
+          {"ceiling", "end_negotiation"} <= {c.command for c in B.PROC_WAR_ROOM_COMMANDS})
+
+    # ================================================================ 10-31 final polish
+    tiers = await db_init.fetch_cpq_tiers()
+    lesson = [{"topic_tag": "Price", "past_mistake": "p", "new_directive": "d", "is_critical": 1}]
+    s_full, _ = N.build_sales_system(tiers, tiers[3], 1_200_000, [], heuristics=lesson, friction_points=["Price"],
+                                     overrides=[B.DECISION_HOLD],
+                                     directives=[{"text": "Hold ₹43.", "status": N.STANDING}])
+    p_full, _ = N.build_procurement_system(mandate, [], heuristics=lesson, friction_points=["Price"],
+                                           overrides=[B.DECISION_CLOSE],
+                                           directives=[{"text": "Hold ₹41.", "status": N.STANDING}])
+
+    def tagged(prompt):
+        """The text inside every NON_NEGOTIABLE_CONSTRAINTS block, and whether the tags pair up."""
+        parts = prompt.split("<NON_NEGOTIABLE_CONSTRAINTS>")[1:]
+        return " ".join(p.split("</NON_NEGOTIABLE_CONSTRAINTS>")[0] for p in parts), \
+            prompt.count("<NON_NEGOTIABLE_CONSTRAINTS>") == prompt.count("</NON_NEGOTIABLE_CONSTRAINTS>")
+
+    for who, prompt, limit in (("Arjun", s_full, "Floor price is ₹41"), ("Neha", p_full, "never offer, demand or accept")):
+        inside, paired = tagged(prompt)
+        check(f"{who}: the attention rule (user text verbatim) in the base prompt", N.NON_NEGOTIABLE_RULE in prompt)
+        check(f"{who}: DB limits, playbook, guardrails and manager decisions inside the tags",
+              paired and limit in inside and "PLAYBOOK" in inside and "MANAGER'S GUARDRAILS" in inside
+              and "ABSOLUTE OVERRIDE COMMANDS" in inside, inside[:300])
+        check(f"{who}: InfoSec rule (user text verbatim) inside the tags", N.INFOSEC_RULE in inside)
+    check("CRITICAL label no longer says 'deadlock' only",
+          "CRITICAL (a standing ruling from your manager" in s_full)
+    check("format check: '44 rupees' and '12 lakh' are rewritten to the ₹ / 1.2M format",
+          N.number_words("charging 44 rupees per parcel") == "44 rupees" and N.number_words("12 lakh parcels")
+          and N.number_words("₹44/parcel on 1.2M parcels a month") is None)
+    m = await new()
+    m["procurement_overrides"] = [B.DECISION_CLOSE]
+    check("Neha's gate: her manager's 'close no matter what' is the sign-off; a walk still needs one",
+          B.signoff_kind(m, "procurement", True, False) is None and B.signoff_kind(m, "procurement", False, True) == "walk")
+    m["procurement_overrides"] = []
+    check("Neha's gate: with no decision, both her close and her walk need a sign-off",
+          B.signoff_kind(m, "procurement", True, False) == "deal" and B.signoff_kind(m, "procurement", False, True) == "walk")
+    m["status"] = "ENDED"
+    cf = Path(db_init.DB_PATH).parent / "control_read_test.json"
+    cf.write_text("", encoding="utf-8")  # the tester has created the file but not written it yet
+
+    async def finish_write():
+        await asyncio.sleep(0.15)
+        cf.write_text('{"cmd": "end"}', encoding="utf-8")
+
+    writer = asyncio.create_task(finish_write())
+    cmd = await B._read_control_file(cf)
+    await writer
+    cf.unlink()
+    check("control file read while still being written: retried, not failed", cmd == {"cmd": "end"}, cmd)
 
     # 10-31 copy check: escalation overrides count as private text for BOTH agents, 5 words in a row
     SCRIPT["procurement"] = [proc("Okay, we hold the price, if they don't agree we go.", 41), proc("₹41/parcel stands.", 41)]

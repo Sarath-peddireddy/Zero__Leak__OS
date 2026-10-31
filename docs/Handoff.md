@@ -2,6 +2,13 @@
 **Current Phase (2026-10-31):** instruction-bleed guardrails built (newest "Resume here"); before that Phase 7 memory pipeline hardening (staging gate + shadow regression); live verification next. Before that: Phase A: verify the Sales Agent + Judge. Two-way escalation live-verified in Telegram (2026-10-26); Arjun handled a match alone using CRITICAL lessons. Phase B (Adversarial Self-Play) parked, see `ROADMAP.md`
 **Status (end of 2026-10-26):** bot LIVE since 21:33 on the latest code (walk-away checks, small-gap close, digits rule). First headless benchmark (5 + 5) was started at 21:42 and left running overnight
 
+## ▶ Resume here (2026-10-31 15:40, live tests 1-2; session zeroleakos-b7 closed)
+- **Bot:** running hidden since 15:32 (test control ON, SELF_PLAY ON, shadow 2 per side from `.env`). Stop: end `python.exe … bot_main.py` in Task Manager. Log `logsot_live.log`. Uncommitted `src/post_match.py` Fourth-Wall Watchdog work belongs to another session (not in commit 2057e2d).
+- **Test 1 (`3bfe8d1f992c`) PASS:** Neha escalated → "Close the deal no matter what" → she accepted in her own words; Judge `one_off`, nothing staged. Deal ₹42/12m/30d.
+- **Copy check made smarter (2057e2d):** the flat 5-word rule rejected both agents twice for stating terms. Now any 10-word run, or a 5-word run with ≥3 strategy words; deal terms/numbers/filler don't count; own citable facts (`allowed=`) never a leak; "if they don't agree" moved to the reveal check.
+- **Test 2 (`cba17478df25`):** 0 drafts sent back; deal ₹42/12m/45d. Arjun used the note (45 days ↔ 18 months), then bent it (45 days on 12 months). Neha invented "our board reviews contracts annually". **Proposal #4** (sales Payment_Terms: 45 days for 18 months instead of 24; ⚠️ critical, removes 24) shadow 2+2 running at close (first pair: control walked away, proposal deal at ₹41/12m, below the ₹42 minimum) → **coach decision pending** in Arjun's DM.
+- Tests: escalation 120 / pause 31 / 1026 47 / 1030 60 / 1031 35 / shadow 32 / neha_escalation 55 / runner PASS / selfplay 94.
+
 ## ▶ Resume here (2026-10-31 evening, newest): instruction-bleed guardrails (defense in depth)
 - **Why:** live match `e98cf1353a14`: after "Close the deal no matter what", Neha told Arjun "Given our manager's instruction to close the deal no matter what, we accept…"; the Judge then proposed a permanent Neha rule that dropped her ceiling.
 - **Built (both agents, details architecture.md Rule 3 + §6):**

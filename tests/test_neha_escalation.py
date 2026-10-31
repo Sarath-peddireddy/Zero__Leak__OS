@@ -363,8 +363,9 @@ async def main():
     SCRIPT["procurement"] = [proc("Okay, we hold the price, if they don't agree we go.", 41), proc("₹41/parcel stands.", 41)]
     CALLS.clear()
     t = await N.procurement_turn([], mandate, [], overrides=[B.DECISION_HOLD])
-    check("Neha: 5 words parroted from the decision -> rewritten", t.text.startswith("₹41/parcel stands.")
-          and "word for word" in CALLS[-1][1], t.text)
+    # since the 10-31 copy rule, the preset decision wording is caught by the reveal check ("if they don't agree")
+    check("Neha: decision parroted -> rewritten", t.text.startswith("₹41/parcel stands.")
+          and ("word for word" in CALLS[-1][1] or "reveals private instructions" in CALLS[-1][1]), t.text)
 
     SCRIPT["procurement"] = [proc(LEAK, 42, deal_closed=True),
                              proc("We accept ₹42/parcel for 12 months with 30-day terms.", 42, deal_closed=True)]

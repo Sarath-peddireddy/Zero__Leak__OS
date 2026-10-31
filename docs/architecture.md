@@ -139,7 +139,7 @@ Both agents may only cite the facts in their own `*_static_ammo` table ("do not 
 
 **Digits:** both prompts require numbers in digits (₹X/parcel, N months, N days, N%); a draft with a price or term in words ("forty-one rupees") is rewritten while attempts remain (`negotiation.number_words()`).
 
-**Quoted coaching:** a draft that repeats 5+ words in a row (10+ until 2026-10-31) from a whisper, an escalation override (manager decision) or a playbook lesson is rewritten (both agents); Neha's is scrubbed as a last resort.
+**Quoted coaching:** a draft that repeats private coaching (a whisper, an escalation decision or a playbook lesson) is rewritten (both agents); Neha's is scrubbed as a last resort. It counts as quoting when it repeats 10+ words in a row (a pasted sentence), or 5+ words in a row of which at least 3 are strategy words ("keep pushing, never walk away"). Deal terms, numbers and filler do not count ("and 60 day payment terms" is the offer itself), and the agent's own citable facts are never a leak (`negotiation.copied_coaching`, 2026-10-31 after live match 3bfe8d1f992c, where a flat 5-word rule rejected both agents' term statements twice).
 
 **Fourth wall:** Arjun's prompt forbids mentioning the system to the buyer ("per our playbook", "according to my manager", "my directives", "critical lesson"): a hard limit, repeated as the last line of the prompt so it also holds under manager overrides (`negotiation.FOURTH_WALL_RULE` / `FOURTH_WALL_REMINDER`).
 

@@ -72,34 +72,9 @@ JSON_ERROR = "SYSTEM_ERROR: Output was not the required JSON object. Rewrite."
 # Bench 2026-10-27: after "Hold the price" Arjun jumped from ₹41 to "₹48 is my bottom line" (list ₹45), then walked.
 ABOVE_LIST_ERROR = ("SYSTEM_ERROR: Proposed price ₹{price:g}/parcel is above the list price of ₹{base:g}/parcel. "
                     "Never quote above list, and never raise a price you already offered for the same terms. Rewrite.")
-# Lexical kill-switch, both agents (2026-10-31; Arjun-only "floor"/"playbook" check since 10-27). A draft
-# containing any of these words (plurals too) is rejected on EVERY attempt: Arjun falls back to his holding
-# line, Neha's offending sentences are dropped. Only the Boardroom "message" is checked; the escalation
-# question to the manager is exempt. "Account manager" is exempt: it is one of SwiftRoute's selling points.
-BANNED_WORDS = ("manager", "playbook", "instruction", "override", "directive", "prompt", "lesson",
-                "critical", "backend", "system", "guardrail")
-SALES_ONLY_BANNED_WORDS = ("floor",)  # Neha may fairly ask about SwiftRoute's floor
-_BANNED_RE = {
-    side: re.compile(r"\b(?:" + "|".join(f"{w}s?" for w in BANNED_WORDS + extra) + r")\b", re.IGNORECASE)
-    for side, extra in (("sales", SALES_ONLY_BANNED_WORDS), ("procurement", ()))
-}
-_BANNED_EXEMPT_RE = re.compile(r"\baccount\s+managers?\b", re.IGNORECASE)
-BANNED_WORDS_ERROR = ('SYSTEM_ERROR: Your message uses internal wording the other side must never see ("{found}"). '
-                      "Never mention a manager, instructions, a playbook, lessons, directives, overrides, prompts, "
-                      "anything critical, the system or the backend. Rewrite it in your own words.")
-
-
-def banned_words(text: str, side: str) -> str | None:
-    """The first banned word in an agent's draft ("manager", "playbook", ...; "floor" too for Sales), else None."""
-    m = _BANNED_RE[side].search(_BANNED_EXEMPT_RE.sub(" ", text))
-    return m.group(0) if m else None
-
-
-def banned_words_line(side: str) -> str:
-    """The kill-switch list as a prompt line, so the agent avoids a rewrite in the first place."""
-    words = ", ".join(f'"{w}"' for w in BANNED_WORDS + (SALES_ONLY_BANNED_WORDS if side == "sales" else ()))
-    exempt = ' (citing our "Dedicated Account Manager" is fine)' if side == "sales" else ""
-    return f"Never use any of these words in your message, in any sense: {words}{exempt}."
+# No word-list ban on internal vocabulary ("floor", "playbook", "manager"...): removed 2026-10-31 (false positives
+# on valid business language burned retries). A slip is posted; the Judge's fourth-wall watchdog catches it after
+# the match and proposes a Communication_Tone lesson (post_match.WATCHDOG_SYSTEM).
 
 
 # Live 2026-10-31 (match e98cf1353a14): after "Close the deal no matter what", Neha told Arjun "Given our
@@ -110,7 +85,7 @@ _REVEAL_RE = re.compile(
     r"\b(?:my|our|the)\s+(?:manager|boss|vp|head of [a-z]+)(?:'s|’s)?\s+(?:instructions?|decision|directives?|"
     r"orders?|guidance|told|said|asked|wants|decided|instructed|insists)\b"
     r"|\b(?:i|we)\s*(?:was|were|have been|'ve been|’ve been|am|are)\s+(?:told|instructed|directed|asked)\s+to\b"
-    r"|\binstructed\b|\binstructions? from\b|\bno matter what\b"
+    r"|\binstructed\b|\binstructions? from\b|\bno matter what\b|\bif they (?:don'?t|don’t|do not) agree\b"
     r"|\b(?:according to|per|as per)\s+(?:my|our)\s+(?:manager|boss|instructions?|guidance|mandate)\b",
     re.IGNORECASE)
 REVEAL_ERROR = ('SYSTEM_ERROR: Your message reveals private instructions or a decision from behind the scenes '
@@ -126,10 +101,9 @@ def revealed_instructions(text: str) -> str | None:
 
 
 def _scrub_revealed(text: str) -> str:
-    """Drop the sentences that reveal instructions or use a banned word (Neha's last resort, like _scrub_copied)."""
+    """Drop the sentences that reveal instructions (Neha's last resort, like _scrub_copied)."""
     sentences = re.split(r"(?<=[.!?])\s+", text.strip())
-    return " ".join(x for x in sentences
-                    if not _REVEAL_RE.search(x) and not banned_words(x, "procurement")).strip()
+    return " ".join(x for x in sentences if not _REVEAL_RE.search(x)).strip()
 
 
 FALLBACK_SALES_LINE = (
@@ -225,7 +199,7 @@ Procurement Manager."""
 PROCUREMENT_FOURTH_WALL_REMINDER = (
     'FINAL CHECK before you answer: re-read your "message". It must sound like your own judgement as an '
     "independent Procurement Manager. Never copy your manager's instructions into it, not even one "
-    "sentence: act on them instead, in your own words. " + banned_words_line("procurement") + " (Your question in "
+    "sentence: act on them instead, in your own words. (Your question in "
     "\"escalation_message_to_manager\" goes only to your manager and is exempt.)"
 )
 
@@ -345,7 +319,7 @@ FOURTH_WALL_RULE = (
 FOURTH_WALL_REMINDER = (
     'FINAL CHECK before you answer: re-read your "message". It must sound like your own judgement as an '
     "independent Account Executive. Remove any mention of a playbook, lessons, directives, guardrails, "
-    "coaching, override commands or what your manager told you. " + banned_words_line("sales") + " (Your question in "
+    "coaching, override commands or what your manager told you. (Your question in "
     '"escalation_message_to_manager" goes only to your manager and is exempt.)'
 )
 
@@ -634,8 +608,21 @@ def text_rates(draft: str) -> list[float]:
     return rates
 
 
-COPY_MIN_WORDS = 5  # this many words in a row from private coaching = the draft is quoting it (10 until 10-31)
-SCRUB_MIN_WORDS = 4  # last resort: drop every sentence sharing this many words in a row with it
+# Copy check (2026-10-31, after live match 3bfe8d1f992c): a leak repeats STRATEGY wording ("keep pushing, never
+# walk away", "don't accept anything above"); an offer repeats DEAL TERMS ("and 60 day payment terms", "terms on a
+# 12 month"), which the agent must say. At a flat 5 words both agents had drafts rejected twice for stating terms.
+COPY_LONG_WORDS = 10    # a run this long is a pasted sentence, whatever its words (the rule until 10-31)
+COPY_MIN_WORDS = 5      # a shorter run counts only if it carries...
+COPY_MIN_DISTINCT = 3   # ...this many strategy words (not deal terms, numbers or filler)
+SCRUB_MIN_WORDS = 4     # last resort: drop every sentence sharing such a run (4+ words, 3 strategy words) with it
+_COPY_FILLER = frozenset(
+    "a an the and or but if of to in on at for with by from as is are was were be been being it its this that "
+    "these those we our us you your i me my he him his she her they them their will would can could should shall "
+    "may might must do does did dont doesnt didnt not no nor so than then just also only very too all any each "
+    "per up".split())
+_COPY_DEAL_TERMS = frozenset(
+    "parcel parcels day days month months year years week weeks payment payments term terms contract contracts "
+    "rate rates rto waiver waivers volume volumes sla rupee rupees lakh crore percent".split())
 COPY_ERROR = ('SYSTEM_ERROR: Your message repeats your private instructions word for word ("{quote}"). '
               "The other side must never see them. Rewrite the message in your own words.")
 COPY_NOTE = "Arjun started to quote your guidance to the buyer word for word, so he rewrote it in his own words."
@@ -685,24 +672,35 @@ def _words(text: str) -> list[str]:
     return re.findall(r"[\w₹]+", text.lower().replace("’", "").replace("'", ""))
 
 
-def copied_coaching(message: str, sources, min_words: int = COPY_MIN_WORDS) -> str | None:
-    """The first `min_words`-word run of any private coaching text (whispers, escalation overrides /
-    manager decisions, playbook lessons) that appears verbatim in `message`, else None."""
+def _strategy_words(words: list[str]) -> int:
+    """How many words of a run carry strategy (not filler, deal-term vocabulary, numbers or ₹ amounts)."""
+    return sum(1 for w in words if w not in _COPY_FILLER and w not in _COPY_DEAL_TERMS
+               and not any(ch.isdigit() for ch in w))
+
+
+def copied_coaching(message: str, sources, min_words: int = COPY_MIN_WORDS, allowed=()) -> str | None:
+    """A run of private coaching (whispers, escalation decisions, playbook lessons) that `message` repeats
+    verbatim, else None: any COPY_LONG_WORDS-word run, or a `min_words`-word run with COPY_MIN_DISTINCT strategy
+    words. Runs that also appear in `allowed` (the agent's own citable facts) are not a leak."""
     padded = f" {' '.join(_words(message))} "
+    facts = [f" {' '.join(_words(a or ''))} " for a in allowed]
     for source in sources:
         words = _words(source or "")
-        for i in range(len(words) - min_words + 1):
-            run = " ".join(words[i:i + min_words])
-            if f" {run} " in padded:
-                return run
+        for size, need in ((COPY_LONG_WORDS, 0), (min_words, COPY_MIN_DISTINCT)):
+            for i in range(len(words) - size + 1):
+                chunk = words[i:i + size]
+                run = " ".join(chunk)
+                if (f" {run} " in padded and _strategy_words(chunk) >= need
+                        and not any(f" {run} " in fact for fact in facts)):
+                    return run
     return None
 
 
-def _scrub_copied(message: str, sources) -> str:
-    """Last resort after the retries: drop every sentence that shares SCRUB_MIN_WORDS words in a row
-    with private coaching (a pasted note often spans sentences, so its pieces go too)."""
+def _scrub_copied(message: str, sources, allowed=()) -> str:
+    """Last resort after the retries: drop every sentence that shares a SCRUB_MIN_WORDS-word strategy run
+    (or any long run) with private coaching (a pasted note often spans sentences, so its pieces go too)."""
     sentences = re.split(r"(?<=[.!?])\s+", message.strip())
-    return " ".join(s for s in sentences if not copied_coaching(s, sources, SCRUB_MIN_WORDS))
+    return " ".join(s for s in sentences if not copied_coaching(s, sources, SCRUB_MIN_WORDS, allowed))
 
 
 class Violation(str):
@@ -952,7 +950,8 @@ async def procurement_turn(
     # Private coaching Neha must act on but never quote (live leak 2026-10-26: she pasted a whisper).
     private = ([d["text"] for d in directives] + list(overrides or [])
                + [h.get("new_directive", "") for h in heuristics or []])
-    data, copied, revealed, banned, base_prompt = None, None, None, None, prompt
+    facts = [a.get("value", "") for a in ammo or []]  # her citable facts: repeating them is not a leak
+    data, copied, revealed, base_prompt = None, None, None, prompt
     for attempt in range(1, MAX_PROCUREMENT_ATTEMPTS + 1):
         raw = await llm_engine.generate("procurement", prompt, system, json_mode=True)
         if escalations_left > 0 and (question := _escalation_question(raw)):
@@ -962,29 +961,26 @@ async def procurement_turn(
         except ValueError as e:  # json.JSONDecodeError is a ValueError
             logger.warning("Procurement JSON invalid (attempt %d): %s", attempt, e)
             continue
-        copied = copied_coaching(data["message"], private)
+        copied = copied_coaching(data["message"], private, allowed=facts)
         revealed = revealed_instructions(data["message"])
-        banned = banned_words(data["message"], "procurement")  # lexical kill-switch
         # Numbers in words only cost a rewrite while attempts remain; they never block the message.
         words = number_words(data["message"]) if attempt < MAX_PROCUREMENT_ATTEMPTS else None
-        if not copied and not words and not revealed and not banned:
+        if not copied and not words and not revealed:
             break
-        logger.warning("Procurement draft rewritten (attempt %d/%d): quoted=%r words=%r revealed=%r banned=%r",
-                       attempt, MAX_PROCUREMENT_ATTEMPTS, copied, words, revealed, banned)
+        logger.warning("Procurement draft rewritten (attempt %d/%d): quoted=%r words=%r revealed=%r",
+                       attempt, MAX_PROCUREMENT_ATTEMPTS, copied, words, revealed)
         errors = ([COPY_ERROR.format(quote=copied)] if copied else []) + \
                  ([REVEAL_ERROR.format(found=revealed)] if revealed else []) + \
-                 ([BANNED_WORDS_ERROR.format(found=banned)] if banned else []) + \
                  ([NUMBER_WORDS_ERROR.format(found=words)] if words else [])
         prompt = f"{base_prompt}\n\n" + "\n".join(errors) + f"\nRejected draft: {data['message']!r}"
     if data is None:
         raise llm_engine.LLMError("Procurement agent kept returning invalid JSON.")
     if copied:  # still quoting after the retries: drop those sentences rather than leak them
-        data["message"] = _scrub_copied(data["message"], private) or PROCUREMENT_FALLBACK_LINE
+        data["message"] = _scrub_copied(data["message"], private, facts) or PROCUREMENT_FALLBACK_LINE
         logger.warning("Procurement draft scrubbed of quoted coaching: %r", data["message"])
-    if revealed_instructions(data["message"]) or banned_words(data["message"], "procurement"):
-        # still revealing or using a banned word: drop those sentences rather than leak them
+    if revealed_instructions(data["message"]):  # still revealing: drop those sentences rather than leak them
         data["message"] = _scrub_revealed(data["message"]) or PROCUREMENT_FALLBACK_LINE
-        logger.warning("Procurement draft scrubbed of a revealed instruction / banned word: %r", data["message"])
+        logger.warning("Procurement draft scrubbed of a revealed instruction: %r", data["message"])
     if data["message"] == PROCUREMENT_FALLBACK_LINE:  # a holding line closes nothing and walks nowhere
         data["deal_closed"] = data["walk_away"] = False
 
@@ -1097,6 +1093,7 @@ async def sales_turn(
     if extra_instruction:
         base_prompt += f"\n\n{extra_instruction}"
     buyer_rates = {r for t in transcript if t["role"] == "procurement" for r in text_rates(t["text"])}
+    facts = [a.get("value", "") for a in ammo or []]  # his citable facts: repeating them is not a leak
     # Private coaching Arjun must act on but never quote to the buyer (fourth wall).
     private = ([d["text"] for d in directives] + list(overrides or [])
                + [h.get("new_directive", "") for h in heuristics or []])
@@ -1113,14 +1110,11 @@ async def sales_turn(
         else:
             draft = data["message"].strip()
             violations, warnings = check_offer(draft, data, tier, buyer_rates, coach_floor)
-            if copied := copied_coaching(draft, private):
+            if copied := copied_coaching(draft, private, allowed=facts):
                 violations.append(Violation(COPY_ERROR.format(quote=copied), COPY_NOTE))
             # Numbers in words: a rewrite while attempts remain (no coach note), never a fallback.
             if attempt < MAX_SALES_ATTEMPTS and (words := number_words(draft)):
                 violations.append(Violation(NUMBER_WORDS_ERROR.format(found=words)))
-            # Lexical kill-switch ("manager", "playbook", "floor"...): rejected on every attempt, never posted.
-            if term := banned_words(draft, "sales"):
-                violations.append(Violation(BANNED_WORDS_ERROR.format(found=term)))
             # A revealed instruction or decision ("my manager's decision", "no matter what"): never posted.
             if found := revealed_instructions(draft):
                 violations.append(Violation(REVEAL_ERROR.format(found=found)))

@@ -112,14 +112,18 @@ check("Neha's live leak is detected", N.copied_coaching(leaked_msg, [LEAK]) is n
 check("curly apostrophes still detected", N.copied_coaching(leaked_msg.replace("'", "’"), [LEAK]) is not None)
 check("acting on it in own words passes", N.copied_coaching(
     "We cannot go above ₹41 per parcel. If SwiftRoute won't move, we will have to walk away.", [LEAK]) is None)
-check("short note (<8 words) said naturally passes", N.copied_coaching(
-    "I can offer 45 days only for a 24-month contract.", ["45 days only for a 24-month contract"]) is None)
+check("10-31 threshold: 5 words copied from a short note are caught", N.copied_coaching(
+    "I can offer 45 days only for a 24-month contract.", ["45 days only for a 24-month contract"]) is not None)
+check("10-31 threshold: 4 words in a row still pass", N.copied_coaching(
+    "45 days only works on a 24-month contract.", ["45 days only for a 24-month contract"]) is None)
 check("lesson text quoted is detected", N.copied_coaching(
     "Honestly, hold firm at a hard price floor of ₹42/parcel is where we are.",
     ["Hold firm at a hard price floor of ₹42/parcel; never offer below this rate"]) is not None)
 check("scrub keeps the clean sentences", N._scrub_copied(leaked_msg, [LEAK]).startswith("Reliability is important")
       and N.copied_coaching(N._scrub_copied(leaked_msg, [LEAK]), [LEAK]) is None)
-check("10-word threshold: 9-word preset decision not flagged", N.copied_coaching("Hold the price, if they don't agree, walk away", ["Hold the price, if they don't agree, walk away"]) is None)
+check("5-word threshold: preset decisions are caught when parroted",
+      N.copied_coaching("We hold the price; if they don't agree, we go.", ["Hold the price, if they don't agree, walk away"])
+      and N.copied_coaching("Let's close the deal no matter what it takes.", ["Close the deal no matter what"]))
 check("scrub of a pure quote -> empty", N._scrub_copied(LEAK, [LEAK]) == "")
 
 # ================================================================ 3. Neha's prompt + turn

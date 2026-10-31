@@ -680,9 +680,11 @@ async def main():
     reset()
     SCRIPT["sales"] = [sales("Our guardrails say ₹42/parcel.", 42)] * 3
     st = await N.sales_turn([{"role": "procurement", "text": "We ship 1.2M parcels/month."}], [], [], [])
-    check("internal words: last attempt posted, never a fallback", not st.fell_back and st.text.startswith("Our"))
-    check("internal words: detector", N.internal_words("our Floor price") == "Floor"
-          and N.internal_words("₹42/parcel with 30-day terms") is None)
+    # 10-31 lexical kill-switch: a banned word is rejected on every attempt, so it is never posted
+    check("banned words: still there on the last attempt -> holding line, never the leak",
+          st.fell_back and st.text == N.FALLBACK_SALES_LINE, st.text)
+    check("banned words: detector", N.banned_words("our Floor price", "sales") == "Floor"
+          and N.banned_words("₹42/parcel with 30-day terms", "sales") is None)
 
     # Two-sided close, other way round (bench 2026-10-28: Arjun "closed" at 30 days while she demanded 60)
     reset()

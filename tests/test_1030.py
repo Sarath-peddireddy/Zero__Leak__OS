@@ -114,11 +114,25 @@ for name, data, want in [("scope none (praise)", {"scope": "none", "topic_tag": 
     check(f"{name} -> skipped ({want})", [(x.action, x.reason) for x in o] == [("skipped", want)], o)
 check("playbook untouched by every skipped note",
       {h["topic_tag"]: h["new_directive"] for h in run(db_init.fetch_heuristics("sales", None))} == before_all)
-check("an escalation marked this_deal is still learned (decisions are generalised)",
+check("a hold/walk decision passes the screen (decisions are generalised by default)",
       P.screen_note("Hold the price, if they don't agree, walk away") is None)
 b = P.Block("sales", "Hold the price, if they don't agree, walk away", [], "escalation", "Close or hold?", [])
-SCRIPT[:] = [j({"scope": "this_deal", "topic_tag": "Price", "past_mistake": "m", "new_directive": "Hold ₹42, walk."})]
-check("synthesize(escalation, scope this_deal) returns a rule", run(P.synthesize(b))[0][0] == "Price")
+SCRIPT[:] = [j({"scope": "standing", "topic_tag": "Price", "past_mistake": "m", "new_directive": "Hold ₹42, walk."})]
+check("synthesize(escalation, scope standing) returns a rule", run(P.synthesize(b))[0][0] == "Price")
+# 10-31: a one-time exception ("close no matter what") marked this_deal by the Judge is no longer force-saved
+b = P.Block("procurement", "Close the deal no matter what", [], "escalation", "Accept or walk?", [])
+SCRIPT[:] = [j({"scope": "this_deal", "topic_tag": "Price", "past_mistake": "m", "new_directive": "Accept ₹42."})]
+try:
+    run(P.synthesize(b))
+    check("synthesize(escalation, scope this_deal) -> skipped as one_off", False)
+except P.Skip as e:
+    check("synthesize(escalation, scope this_deal) -> skipped as one_off", e.args[0] == "one_off", e.args)
+for name in ("sales", "procurement"):
+    check(f"one-off filter in the {name} whisper Judge prompt", P._ONE_OFF_RULE in P.JUDGE_SYSTEM[name])
+check("one-off filter in both escalation Judge prompts (user text verbatim)",
+      all(P._ONE_OFF_RULE in s and "DO NOT create a permanent playbook rule that drops the agent's mathematical "
+          "limits. Only create heuristics for tactical negotiation flaws." in s
+          for s in (P.ESCALATION_JUDGE_SYSTEM, P.PROCUREMENT_ESCALATION_JUDGE_SYSTEM)))
 
 # ================================================================ 1. staging gate: every change waits for the coach
 old = {"new_directive": "Below ₹42 only for 18 months, then walk away if she refuses.", "is_critical": 0}

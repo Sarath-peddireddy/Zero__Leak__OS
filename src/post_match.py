@@ -101,6 +101,17 @@ instruction at all (praise or encouragement like "good job", "keep going", an ac
 Never invent a rule the note does not state.
 topic_tag "Other" if the note is about none of the listed topics (e.g. fuel surcharges): do not force it into Price."""
 
+# One-off filter (2026-10-31, user text verbatim + how to say it in the JSON): after Neha's manager answered
+# "close the deal no matter what", the Judge proposed a permanent rule that dropped her price ceiling.
+_ONE_OFF_RULE = """\
+Distinguish between repeatable negotiation tactics and one-time business exceptions. If a manager overrides \
+the agent just to force a deal closed (e.g., 'close no matter what'), DO NOT create a permanent playbook rule \
+that drops the agent's mathematical limits. Only create heuristics for tactical negotiation flaws.
+In that case set "scope" to "this_deal" for the exception itself. If the same event also exposed a tactical \
+flaw (e.g. the agent never traded payment terms before deadlocking), you may give that tactic as a \
+"standing" lesson, but it must keep every price, ceiling, floor and limit exactly as it was. A decision to \
+hold firm and walk away if refused is a repeatable tactic: "standing"."""
+
 # Reward-model separation: each side is audited by its OWN boss, with opposite goals, so a lesson
 # written for one agent never carries the other side's interests (needed before self-play).
 JUDGE_PERSONAS = {
@@ -124,13 +135,15 @@ JUDGE_SYSTEM = {
 Look at the context and your manager's whisper to Arjun. Identify the mistake Arjun was making that \
 required the intervention, and write the rule that protects SwiftRoute's margin next time.
 {_JUDGE_FORMAT}
-{_TAG_RULE}""",
+{_TAG_RULE}
+{_ONE_OFF_RULE}""",
     "procurement": f"""\
 {JUDGE_PERSONAS["procurement"]}
 Look at the context and the coach's whisper to Neha. Identify the mistake Neha was making that \
 required the intervention, and write the rule that cuts MegaMart's cost next time.
 {_JUDGE_FORMAT}
-{_TAG_RULE}""",
+{_TAG_RULE}
+{_ONE_OFF_RULE}""",
 }
 
 # Step 4 of the two-way escalation: a deadlock the manager had to break becomes a CRITICAL lesson,
@@ -140,7 +153,8 @@ ESCALATION_JUDGE_SYSTEM = f"""\
 In this negotiation Arjun got stuck and escalated to his manager instead of replying to the buyer. You are given the Boardroom \
 messages before the escalation, Arjun's question, the manager's decision, and what happened right after.
 Write the CRITICAL lesson that lets Arjun break this kind of deadlock on his own next time, without \
-asking: turn the manager's decision into a general rule. State the trigger (what the buyer did: the \
+asking: turn the manager's decision into a general rule (unless it is a one-time business exception, see \
+below). State the trigger (what the buyer did: the \
 price, terms or threat that caused the deadlock) and the exact action to take (keep every number and \
 condition from the decision).
 {_JUDGE_FORMAT}
@@ -148,7 +162,8 @@ past_mistake: describe the deadlock Arjun could not resolve alone (e.g. "Froze a
 the buyer demanded ₹41 and threatened to walk on a 12-month term").
 new_directive: the decision as a standing rule (e.g. "When the buyer demands ₹41 and threatens to walk \
 on 12 months, state ₹43 as final; if rejected, walk away.").
-Choose topic_tag by what the decision governs (usually Price, Contract_Length, RTO or Payment_Terms)."""
+Choose topic_tag by what the decision governs (usually Price, Contract_Length, RTO or Payment_Terms).
+{_ONE_OFF_RULE}"""
 AFTER_MESSAGES = 2  # Boardroom messages after the decision, to show the Judge how it played out
 
 # Neha's escalations (2026-10-31), judged by her own boss (reward-model separation). Only with SELF_PLAY.
@@ -157,12 +172,14 @@ PROCUREMENT_ESCALATION_JUDGE_SYSTEM = f"""\
 In this negotiation Neha got stuck and escalated to her manager instead of replying to SwiftRoute. You are given \
 the Boardroom messages before the escalation, Neha's question, the manager's decision, and what happened right after.
 Write the CRITICAL lesson that lets Neha break this kind of deadlock on her own next time, without asking: turn \
-the manager's decision into a general rule. State the trigger (what SwiftRoute did: the price, terms or threat \
-that caused the deadlock) and the exact action to take (keep every number and condition from the decision).
+the manager's decision into a general rule (unless it is a one-time business exception, see below). State the \
+trigger (what SwiftRoute did: the price, terms or threat that caused the deadlock) and the exact action to take \
+(keep every number and condition from the decision).
 {_JUDGE_FORMAT}
 past_mistake: describe the deadlock Neha could not resolve alone.
 new_directive: the decision as a standing rule.
-Choose topic_tag by what the decision governs (usually Price, Contract_Length, RTO or Payment_Terms)."""
+Choose topic_tag by what the decision governs (usually Price, Contract_Length, RTO or Payment_Terms).
+{_ONE_OFF_RULE}"""
 ESCALATION_SPEAKERS = {"Manager_Decision": ("sales", "Sales_Escalation"),
                        "Procure_Decision": ("procurement", "Procure_Escalation")}  # decision -> (side, question)
 
@@ -329,7 +346,9 @@ async def synthesize(block: Block) -> list[tuple[str, dict]]:
         if scope == "none":
             skips.append("no_lesson")
             continue
-        if scope == "this_deal" and block.kind != "escalation":  # a decision is generalised by design
+        # Decisions are generalised by default, but since 10-31 a one-time exception ("close no matter
+        # what") is not: the escalation prompts say when to mark it this_deal (_ONE_OFF_RULE).
+        if scope == "this_deal":
             skips.append("one_off")
             continue
         if str(item.get("topic_tag") or "").strip().lower() == "other":

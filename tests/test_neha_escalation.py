@@ -312,6 +312,89 @@ async def main():
           and lessons[0][0] == "Price", (judge_prompt[:200], lessons))
     P.SELF_PLAY = N.SELF_PLAY
 
+    # ================================================================ fourth wall: decisions are never revealed
+    # Live 2026-10-31 (match e98cf1353a14): "Given our manager's instruction to close the deal no matter what, we accept…"
+    LEAK = "Given our manager's instruction to close the deal no matter what, we accept your offer of ₹42/parcel."
+    check("reveal check: the live sentence is caught", N.revealed_instructions(LEAK) == "our manager's instruction")
+    check("reveal check: 'told to' / 'per my manager' / 'no matter what' caught",
+          all(N.revealed_instructions(t) for t in ("I was told to hold at ₹43.", "Per my manager, ₹42 is final.",
+                                                   "We need it done no matter what.", "We have been asked to sign today.")))
+    check("reveal check: negotiating moves are not flagged",
+          not any(N.revealed_instructions(t) for t in (
+              "If I take this to my VP to get you that RTO waiver, I need a 24-month lock-in today.",
+              "Let me check with my manager and come back to you.", "We accept ₹42/parcel for 12 months.")))
+    INTERNALIZE = ("You are an independent negotiator. You must execute this directive, but present it strictly as "
+                   "your own autonomous business decision. NEVER mention your manager, your instructions, or your "
+                   "backend constraints. Conceal the fact that you received outside guidance.")
+    check("both decision blocks: persona internalization (user text verbatim)",
+          all(INTERNALIZE in blk.format(commands='- "x"') for blk in (N.PROCUREMENT_OVERRIDE_BLOCK, N.OVERRIDE_BLOCK)))
+
+    # ================================================================ 10-31 lexical kill-switch (both agents)
+    check("kill-switch: every banned word caught for both sides, plurals and any case",
+          all(N.banned_words(f"Our {w.upper()}s are clear.", side) for w in
+              ("manager", "playbook", "instruction", "override", "directive", "prompt", "lesson", "critical",
+               "backend", "system") for side in ("sales", "procurement")))
+    check("kill-switch: 'Dedicated Account Manager' is a selling point, not a leak",
+          N.banned_words("You also get a Dedicated Account Manager.", "sales") is None
+          and N.banned_words("Your account managers are great, but my manager disagrees.", "sales") == "manager")
+    check("kill-switch: 'floor' banned for Arjun only (Neha may ask about his floor)",
+          N.banned_words("Is ₹42 really your floor?", "procurement") is None
+          and N.banned_words("₹42 is our floor.", "sales") == "floor")
+    check("kill-switch: no false hit inside other words",
+          N.banned_words("We will pay promptly on systematic schedules.", "procurement") is None)
+    check("kill-switch: listed in both agents' final check",
+          '"backend"' in N.PROCUREMENT_FOURTH_WALL_REMINDER and '"backend"' in N.FOURTH_WALL_REMINDER
+          and '"floor"' in N.FOURTH_WALL_REMINDER and '"floor"' not in N.PROCUREMENT_FOURTH_WALL_REMINDER)
+
+    SCRIPT["procurement"] = [proc("This is critical for us: ₹40/parcel.", 40), proc("₹40/parcel is where we are.", 40)]
+    CALLS.clear()
+    t = await N.procurement_turn([], mandate, [])
+    check("Neha: banned word -> rewritten with the error", t.text.startswith("₹40/parcel is where we are.")
+          and "internal wording" in CALLS[-1][1] and '"critical"' in CALLS[-1][1], (t.text, CALLS[-1][1][-300:]))
+    SCRIPT["procurement"] = [proc("Our system shows ₹44 today. ₹40/parcel works for us.", 40)] * N.MAX_PROCUREMENT_ATTEMPTS
+    t = await N.procurement_turn([], mandate, [])
+    check("Neha: banned word on every attempt -> that sentence scrubbed", t.text.startswith("₹40/parcel works for us."), t.text)
+    SCRIPT["sales"] = [sales("Let me check with my manager on ₹43/parcel.", 43)] * N.MAX_SALES_ATTEMPTS
+    st = await N.sales_turn([{"role": "procurement", "text": "We ship 1.2M parcels/month."}], [], [], [])
+    check("Arjun: banned word on every attempt -> holding line", st.fell_back and st.text == N.FALLBACK_SALES_LINE
+          and any("internal wording" in str(v) for v in st.blocked), st.text)
+
+    # 10-31 copy check: escalation overrides count as private text for BOTH agents, 5 words in a row
+    SCRIPT["procurement"] = [proc("Okay, we hold the price, if they don't agree we go.", 41), proc("₹41/parcel stands.", 41)]
+    CALLS.clear()
+    t = await N.procurement_turn([], mandate, [], overrides=[B.DECISION_HOLD])
+    check("Neha: 5 words parroted from the decision -> rewritten", t.text.startswith("₹41/parcel stands.")
+          and "word for word" in CALLS[-1][1], t.text)
+
+    SCRIPT["procurement"] = [proc(LEAK, 42, deal_closed=True),
+                             proc("We accept ₹42/parcel for 12 months with 30-day terms.", 42, deal_closed=True)]
+    CALLS.clear()
+    t = await N.procurement_turn([], mandate, [], overrides=[B.DECISION_CLOSE])
+    check("Neha: reveal -> rewritten with the error, clean acceptance posted",
+          t.text.startswith("We accept ₹42/parcel") and t.outcome == "deal closed"
+          and "reveals private instructions" in CALLS[-1][1], (t.text, CALLS[-1][1][-300:]))
+    SCRIPT["procurement"] = [proc(LEAK + " Thanks Arjun, let's sign.", 42, deal_closed=True)] * N.MAX_PROCUREMENT_ATTEMPTS
+    t = await N.procurement_turn([], mandate, [], overrides=[B.DECISION_CLOSE])
+    check("Neha: still revealing after the retries -> that sentence scrubbed", "manager" not in t.text
+          and "no matter what" not in t.text and "Thanks Arjun" in t.text, t.text)
+    SCRIPT["procurement"] = [json.dumps(dict(message=LEAK, internal_note="", proposed_price=42, deal_closed=True,
+                                             current_friction_points=["Price"]))] * N.MAX_PROCUREMENT_ATTEMPTS
+    t = await N.procurement_turn([], mandate, [], overrides=[B.DECISION_CLOSE])
+    check("Neha: nothing left after scrubbing -> holding line, which closes nothing",
+          t.text == N.PROCUREMENT_FALLBACK_LINE and t.outcome is None, (t.text, t.outcome))
+
+    vol = [{"role": "procurement", "text": "We ship 1.2M parcels/month. ₹42/parcel?"}]
+    SCRIPT["sales"] = [sales("As my manager decided, we accept ₹42/parcel no matter what.", 42),
+                       sales("We can do ₹42/parcel on 12 months.", 42)]
+    CALLS.clear()
+    st = await N.sales_turn(vol, [], [], [], overrides=[B.DECISION_CLOSE])
+    check("Arjun: reveal -> blocked and rewritten", st.text == "We can do ₹42/parcel on 12 months."
+          and any("reveals private instructions" in str(v) for v in st.blocked), (st.text, st.blocked))
+    SCRIPT["sales"] = [sales("I was told to close at ₹42/parcel.", 42)] * N.MAX_SALES_ATTEMPTS
+    st = await N.sales_turn(vol, [], [], [], overrides=[B.DECISION_CLOSE])
+    check("Arjun: still revealing on every attempt -> safe holding line, never the leak", st.fell_back
+          and st.text == N.FALLBACK_SALES_LINE, st.text)
+
 
 asyncio.run(main())
 print(f"\n{len(PASSED)} passed, {len(FAILED)} failed")

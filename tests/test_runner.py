@@ -32,8 +32,9 @@ async def fake(agent, prompt, system_instruction=None, json_mode=False, temperat
         if n == 3:  # one escalation, answered by the auto manager
             return j(message="", proposed_price=None, requires_manager_approval=True,
                      escalation_message_to_manager="Close or hold?")
-        # A leak the scoreboard counts but the guard does not rewrite ("playbook"/"floor" are rewritten since 10-27).
-        return j(message=f"₹42/parcel, as my manager said ({n}).", proposed_price=42, offers_rto_waiver=False,
+        # A leak the scoreboard counts but the guard does not rewrite (the 10-31 kill-switch covers "manager",
+        # "lesson", "playbook"..., not "coach").
+        return j(message=f"₹42/parcel, my coach agrees ({n}).", proposed_price=42, offers_rto_waiver=False,
                  contract_months=12, current_friction_points=["Price"], executed_directive_ids=[],
                  requires_manager_approval=False, escalation_message_to_manager="",
                  deal_closed=n >= 5, walk_away=False)

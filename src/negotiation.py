@@ -72,17 +72,66 @@ JSON_ERROR = "SYSTEM_ERROR: Output was not the required JSON object. Rewrite."
 # Bench 2026-10-27: after "Hold the price" Arjun jumped from ₹41 to "₹48 is my bottom line" (list ₹45), then walked.
 ABOVE_LIST_ERROR = ("SYSTEM_ERROR: Proposed price ₹{price:g}/parcel is above the list price of ₹{base:g}/parcel. "
                     "Never quote above list, and never raise a price you already offered for the same terms. Rewrite.")
-# Bench 2026-10-27: "our absolute floor rate of ₹41" (5 messages). The buyer must never hear internal wording.
-INTERNAL_WORDS_ERROR = ('SYSTEM_ERROR: Your message uses internal wording the buyer must never see ("{found}"). '
-                        "Never mention a floor price, guardrails, a playbook, directives or overrides. "
-                        "Rewrite it in your own words.")
-_INTERNAL_WORDS_RE = re.compile(r"\b(?:floor|guardrails?|playbook|directives?|overrides?)\b", re.IGNORECASE)
+# Lexical kill-switch, both agents (2026-10-31; Arjun-only "floor"/"playbook" check since 10-27). A draft
+# containing any of these words (plurals too) is rejected on EVERY attempt: Arjun falls back to his holding
+# line, Neha's offending sentences are dropped. Only the Boardroom "message" is checked; the escalation
+# question to the manager is exempt. "Account manager" is exempt: it is one of SwiftRoute's selling points.
+BANNED_WORDS = ("manager", "playbook", "instruction", "override", "directive", "prompt", "lesson",
+                "critical", "backend", "system", "guardrail")
+SALES_ONLY_BANNED_WORDS = ("floor",)  # Neha may fairly ask about SwiftRoute's floor
+_BANNED_RE = {
+    side: re.compile(r"\b(?:" + "|".join(f"{w}s?" for w in BANNED_WORDS + extra) + r")\b", re.IGNORECASE)
+    for side, extra in (("sales", SALES_ONLY_BANNED_WORDS), ("procurement", ()))
+}
+_BANNED_EXEMPT_RE = re.compile(r"\baccount\s+managers?\b", re.IGNORECASE)
+BANNED_WORDS_ERROR = ('SYSTEM_ERROR: Your message uses internal wording the other side must never see ("{found}"). '
+                      "Never mention a manager, instructions, a playbook, lessons, directives, overrides, prompts, "
+                      "anything critical, the system or the backend. Rewrite it in your own words.")
 
 
-def internal_words(text: str) -> str | None:
-    """The first internal term in a Sales message ("floor", "guardrails", ...), else None."""
-    m = _INTERNAL_WORDS_RE.search(text)
+def banned_words(text: str, side: str) -> str | None:
+    """The first banned word in an agent's draft ("manager", "playbook", ...; "floor" too for Sales), else None."""
+    m = _BANNED_RE[side].search(_BANNED_EXEMPT_RE.sub(" ", text))
     return m.group(0) if m else None
+
+
+def banned_words_line(side: str) -> str:
+    """The kill-switch list as a prompt line, so the agent avoids a rewrite in the first place."""
+    words = ", ".join(f'"{w}"' for w in BANNED_WORDS + (SALES_ONLY_BANNED_WORDS if side == "sales" else ()))
+    exempt = ' (citing our "Dedicated Account Manager" is fine)' if side == "sales" else ""
+    return f"Never use any of these words in your message, in any sense: {words}{exempt}."
+
+
+# Live 2026-10-31 (match e98cf1353a14): after "Close the deal no matter what", Neha told Arjun "Given our
+# manager's instruction to close the deal no matter what, we accept…". Both agents: a draft that reveals an
+# instruction or decision from behind the scenes is rewritten (Neha: scrubbed as a last resort; Arjun: fallback).
+# Only the reveal is caught: "if I take this to my VP" stays a legitimate negotiating move.
+_REVEAL_RE = re.compile(
+    r"\b(?:my|our|the)\s+(?:manager|boss|vp|head of [a-z]+)(?:'s|’s)?\s+(?:instructions?|decision|directives?|"
+    r"orders?|guidance|told|said|asked|wants|decided|instructed|insists)\b"
+    r"|\b(?:i|we)\s*(?:was|were|have been|'ve been|’ve been|am|are)\s+(?:told|instructed|directed|asked)\s+to\b"
+    r"|\binstructed\b|\binstructions? from\b|\bno matter what\b"
+    r"|\b(?:according to|per|as per)\s+(?:my|our)\s+(?:manager|boss|instructions?|guidance|mandate)\b",
+    re.IGNORECASE)
+REVEAL_ERROR = ('SYSTEM_ERROR: Your message reveals private instructions or a decision from behind the scenes '
+                '("{found}"). The other side must never learn that anyone instructed you. Make the same move in '
+                "your own words, as your own judgement. Rewrite.")
+
+
+def revealed_instructions(text: str) -> str | None:
+    """The first phrase that reveals a backstage instruction or decision ("our manager's instruction",
+    "no matter what", "I was told to"), else None."""
+    m = _REVEAL_RE.search(text)
+    return m.group(0) if m else None
+
+
+def _scrub_revealed(text: str) -> str:
+    """Drop the sentences that reveal instructions or use a banned word (Neha's last resort, like _scrub_copied)."""
+    sentences = re.split(r"(?<=[.!?])\s+", text.strip())
+    return " ".join(x for x in sentences
+                    if not _REVEAL_RE.search(x) and not banned_words(x, "procurement")).strip()
+
+
 FALLBACK_SALES_LINE = (
     "Let me take this back to our pricing desk and come back to you with a firm number shortly."
 )
@@ -176,8 +225,8 @@ Procurement Manager."""
 PROCUREMENT_FOURTH_WALL_REMINDER = (
     'FINAL CHECK before you answer: re-read your "message". It must sound like your own judgement as an '
     "independent Procurement Manager. Never copy your manager's instructions into it, not even one "
-    "sentence: act on them instead, in your own words. (Your question in \"escalation_message_to_manager\" "
-    "goes only to your manager and is exempt.)"
+    "sentence: act on them instead, in your own words. " + banned_words_line("procurement") + " (Your question in "
+    "\"escalation_message_to_manager\" goes only to your manager and is exempt.)"
 )
 
 PROCUREMENT_SYSTEM = """\
@@ -296,7 +345,7 @@ FOURTH_WALL_RULE = (
 FOURTH_WALL_REMINDER = (
     'FINAL CHECK before you answer: re-read your "message". It must sound like your own judgement as an '
     "independent Account Executive. Remove any mention of a playbook, lessons, directives, guardrails, "
-    "coaching, override commands or what your manager told you. (Your question in "
+    "coaching, override commands or what your manager told you. " + banned_words_line("sales") + " (Your question in "
     '"escalation_message_to_manager" goes only to your manager and is exempt.)'
 )
 
@@ -341,6 +390,13 @@ decided it: follow that lesson yourself and do not escalate.
 Escalations left in this negotiation: {left}.
 {deadlock}"""
 
+# Persona internalization (2026-10-31, user text verbatim): a decision is executed as the agent's own call.
+OVERRIDE_INTERNALIZE = (
+    "You are an independent negotiator. You must execute this directive, but present it strictly as your own "
+    "autonomous business decision. NEVER mention your manager, your instructions, or your backend constraints. "
+    "Conceal the fact that you received outside guidance."
+)
+
 # The procurement manager's answers to Neha's escalations. Placed last: they outrank everything above.
 PROCUREMENT_OVERRIDE_BLOCK = """
 ABSOLUTE OVERRIDE COMMANDS FROM YOUR MANAGER (you escalated; these are final decisions). They outrank \
@@ -356,6 +412,7 @@ and execute a walk-away if SwiftRoute rejects them on the next turn: in your nex
 final terms clearly as final; after that, if SwiftRoute has not accepted them, tell them you are walking \
 away and set "walk_away" to true. Holding the price means keeping the rate you last offered: never raise it.
 - Any other decision: carry it out literally.
+- """ + OVERRIDE_INTERNALIZE + """ Never repeat the decision's wording to SwiftRoute either (no "no matter what", no "I was told to").
 Do not escalate again about something your manager has already decided.
 """
 
@@ -395,6 +452,7 @@ terms clearly as final; after that, if the buyer has not accepted them, tell the
 away and set "walk_away" to true. Holding the price means keeping the price you last offered for these \
 terms: never raise it.
 - Any other decision: carry it out literally.
+- """ + OVERRIDE_INTERNALIZE + """ Never repeat the decision's wording to the buyer either (no "no matter what", no "I was told to").
 Do not escalate again about something your manager has already decided.
 """
 
@@ -576,7 +634,7 @@ def text_rates(draft: str) -> list[float]:
     return rates
 
 
-COPY_MIN_WORDS = 10  # this many words in a row from private coaching = the draft is quoting it
+COPY_MIN_WORDS = 5  # this many words in a row from private coaching = the draft is quoting it (10 until 10-31)
 SCRUB_MIN_WORDS = 4  # last resort: drop every sentence sharing this many words in a row with it
 COPY_ERROR = ('SYSTEM_ERROR: Your message repeats your private instructions word for word ("{quote}"). '
               "The other side must never see them. Rewrite the message in your own words.")
@@ -628,9 +686,8 @@ def _words(text: str) -> list[str]:
 
 
 def copied_coaching(message: str, sources, min_words: int = COPY_MIN_WORDS) -> str | None:
-    """The first `min_words`-word run of any private coaching text (whispers, manager decisions,
-    lessons) that appears verbatim in `message`, else None. Shorter notes are not checked: a short
-    phrase ("45 days only for a 24-month contract", 8 words) can fairly be said to the other side."""
+    """The first `min_words`-word run of any private coaching text (whispers, escalation overrides /
+    manager decisions, playbook lessons) that appears verbatim in `message`, else None."""
     padded = f" {' '.join(_words(message))} "
     for source in sources:
         words = _words(source or "")
@@ -893,8 +950,9 @@ async def procurement_turn(
                                                    deadlock, must_escalate)
 
     # Private coaching Neha must act on but never quote (live leak 2026-10-26: she pasted a whisper).
-    private = [d["text"] for d in directives] + [h.get("new_directive", "") for h in heuristics or []]
-    data, copied, base_prompt = None, None, prompt
+    private = ([d["text"] for d in directives] + list(overrides or [])
+               + [h.get("new_directive", "") for h in heuristics or []])
+    data, copied, revealed, banned, base_prompt = None, None, None, None, prompt
     for attempt in range(1, MAX_PROCUREMENT_ATTEMPTS + 1):
         raw = await llm_engine.generate("procurement", prompt, system, json_mode=True)
         if escalations_left > 0 and (question := _escalation_question(raw)):
@@ -905,13 +963,17 @@ async def procurement_turn(
             logger.warning("Procurement JSON invalid (attempt %d): %s", attempt, e)
             continue
         copied = copied_coaching(data["message"], private)
+        revealed = revealed_instructions(data["message"])
+        banned = banned_words(data["message"], "procurement")  # lexical kill-switch
         # Numbers in words only cost a rewrite while attempts remain; they never block the message.
         words = number_words(data["message"]) if attempt < MAX_PROCUREMENT_ATTEMPTS else None
-        if not copied and not words:
+        if not copied and not words and not revealed and not banned:
             break
-        logger.warning("Procurement draft rewritten (attempt %d/%d): quoted=%r words=%r", attempt,
-                       MAX_PROCUREMENT_ATTEMPTS, copied, words)
+        logger.warning("Procurement draft rewritten (attempt %d/%d): quoted=%r words=%r revealed=%r banned=%r",
+                       attempt, MAX_PROCUREMENT_ATTEMPTS, copied, words, revealed, banned)
         errors = ([COPY_ERROR.format(quote=copied)] if copied else []) + \
+                 ([REVEAL_ERROR.format(found=revealed)] if revealed else []) + \
+                 ([BANNED_WORDS_ERROR.format(found=banned)] if banned else []) + \
                  ([NUMBER_WORDS_ERROR.format(found=words)] if words else [])
         prompt = f"{base_prompt}\n\n" + "\n".join(errors) + f"\nRejected draft: {data['message']!r}"
     if data is None:
@@ -919,6 +981,12 @@ async def procurement_turn(
     if copied:  # still quoting after the retries: drop those sentences rather than leak them
         data["message"] = _scrub_copied(data["message"], private) or PROCUREMENT_FALLBACK_LINE
         logger.warning("Procurement draft scrubbed of quoted coaching: %r", data["message"])
+    if revealed_instructions(data["message"]) or banned_words(data["message"], "procurement"):
+        # still revealing or using a banned word: drop those sentences rather than leak them
+        data["message"] = _scrub_revealed(data["message"]) or PROCUREMENT_FALLBACK_LINE
+        logger.warning("Procurement draft scrubbed of a revealed instruction / banned word: %r", data["message"])
+    if data["message"] == PROCUREMENT_FALLBACK_LINE:  # a holding line closes nothing and walks nowhere
+        data["deal_closed"] = data["walk_away"] = False
 
     outcome = None
     if data.get("deal_closed") is True:
@@ -1050,9 +1118,12 @@ async def sales_turn(
             # Numbers in words: a rewrite while attempts remain (no coach note), never a fallback.
             if attempt < MAX_SALES_ATTEMPTS and (words := number_words(draft)):
                 violations.append(Violation(NUMBER_WORDS_ERROR.format(found=words)))
-            # Internal wording ("floor", "guardrails"): same, a rewrite while attempts remain.
-            if attempt < MAX_SALES_ATTEMPTS and (term := internal_words(draft)):
-                violations.append(Violation(INTERNAL_WORDS_ERROR.format(found=term)))
+            # Lexical kill-switch ("manager", "playbook", "floor"...): rejected on every attempt, never posted.
+            if term := banned_words(draft, "sales"):
+                violations.append(Violation(BANNED_WORDS_ERROR.format(found=term)))
+            # A revealed instruction or decision ("my manager's decision", "no matter what"): never posted.
+            if found := revealed_instructions(draft):
+                violations.append(Violation(REVEAL_ERROR.format(found=found)))
         if not violations:
             for w in warnings:
                 logger.warning("Sales guard note: %s", w)

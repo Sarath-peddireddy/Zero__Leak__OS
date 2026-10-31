@@ -1,5 +1,5 @@
 """
-ZeroLeak OS - Telegram Dual-Bot Orchestrator & Simulation Loop.
+ZeroLeak OS - Telegram Dual-Bot Orchestrator & Negotiation Loop (Autonomous Multi-Agent Deal Desk).
 
 Runs the Sales bot and the Procurement bot as two python-telegram-bot
 Applications polling concurrently in one asyncio event loop.
@@ -28,15 +28,22 @@ Zero-hardcode: the buyer's mandate and both sides' static ammo are read from SQL
 when a match starts and passed into the prompts. Symmetrical JIT: each agent tags its
 message (max 2 tags); before the opponent replies, the opponent's master lesson for each
 tag is fetched from its own heuristics table (max 2 rules per turn).
+
+Memory staging gate: after a match the Judge only STAGES playbook changes (pending_lessons).
+Once the reports are out, each proposal is shadow-tested headless (shadow_test.py) and the
+coach gets one 🧠 approval request with the result and ✅ Approve / ❌ Reject buttons; only
+✅ writes the live playbook. Requests not sent before a restart go out at the next start.
 """
 
 import asyncio
+import json
 import logging
 import os
 import random
 import re
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 from dotenv import load_dotenv
 from telegram import (
@@ -48,6 +55,7 @@ from telegram.error import BadRequest, Forbidden, NetworkError, TelegramError
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 import chat_cleaner
+import db_init
 import llm_engine
 import negotiation
 import post_match
@@ -93,7 +101,19 @@ ESCALATION_TIMEOUT_DM = (
     "No decision came in, so Arjun is continuing on his own within your limits."
 )
 DECISION_ACK = "Got it. Arjun will act on your decision now: “{decision}”."
-APPROVAL_TIMEOUT_S = 15 * 60  # Arjun waits this long for an answer, then continues on his own
+APPROVAL_TIMEOUT_S = 15 * 60  # an agent waits this long for an answer, then continues on its own
+# Neha's escalations (2026-10-31): her War Room hears from her in the first person, like her other notes.
+ESCALATION_DMS = {"sales": ESCALATION_DM, "procurement": (
+    "🙋 I need your decision\n\n"
+    "{question}\n\n"
+    "The negotiation is on hold until you answer. Tap an option, or type your own decision here.")}
+ESCALATION_TIMEOUT_DMS = {"sales": ESCALATION_TIMEOUT_DM,
+                          "procurement": "No decision came in, so I'm continuing on my own within our mandate."}
+DECISION_ACKS = {"sales": DECISION_ACK, "procurement": "Got it. I'll act on your decision now: “{decision}”."}
+AGENT_NAMES = {"sales": "Arjun", "procurement": "Neha"}
+# Per side: (ledger speaker of the question, of the decision)
+ESCALATION_SPEAKERS = {"sales": ("Sales_Escalation", "Manager_Decision"),
+                       "procurement": ("Procure_Escalation", "Procure_Decision")}
 # Bot @usernames never appear in chat text: screenshots get shared publicly, and a visible
 # username lets anyone message the bots. Refer to them as "a personal DM with Arjun / Neha".
 BOARDROOM_OPENING = (
@@ -154,6 +174,7 @@ TURN_DELAY_S = (2.0, 3.0)      # pause between agent messages: avoids throttling
 LEDGER_SPEAKERS = {"sales": "Sales_Agent", "procurement": "Procure_Agent"}
 TELEGRAM_TIMEOUT_S = 20.0      # connect/read/write/pool timeout for Bot API calls
 TELEGRAM_RETRY_DELAYS_S = (2.0, 5.0)  # Boardroom posts retried on network blips
+NOTIFY_RETRIES, NOTIFY_RETRY_DELAY_S = 3, 2.0  # DMs, alerts, reports, notices (notify)
 STARTUP_RETRY_DELAYS_S = (5.0, 10.0, 20.0, 30.0)  # bot startup retried on network drops
 JUDGE_WAIT_FOR_LOOP_S = 60.0   # Judge waits this long for the match loop to stop before reading the ledger
 JUDGE_SHUTDOWN_WAIT_S = 90.0   # on shutdown, let running Judge reviews finish
@@ -200,7 +221,7 @@ ESCALATION_MENU = _keyboard([("✅ Close the deal no matter what", "esc:close")]
 STATUS_LABELS = {
     "AWAITING_PROCUREMENT": "🟢 In progress: Neha is responding",
     "AWAITING_SALES": "🟢 In progress: Arjun is responding",
-    "AWAITING_MANAGER_APPROVAL": "⏳ On hold: Arjun is consulting his manager",
+    "AWAITING_MANAGER_APPROVAL": "⏳ On hold: {name} is consulting {their} manager",
     "ENDED": "🔴 Closed",
 }
 
@@ -210,7 +231,7 @@ active_matches: dict[int, dict] = {}
 war_room_to_group: dict[int, int] = {}
 # Procurement War Room DM chat_id (DM with the Procurement bot) -> the Boardroom group_chat_id it coaches.
 proc_war_room_to_group: dict[int, int] = {}
-# Boardroom group_chat_id -> running simulation loop.
+# Boardroom group_chat_id -> running negotiation loop.
 match_tasks: dict[int, asyncio.Task] = {}
 # Post-match Judge reviews in flight (strong refs so they are not garbage-collected).
 judge_tasks: set[asyncio.Task] = set()
@@ -287,22 +308,46 @@ def new_match(sales_war_room_chat_id: int, mandate: dict, sales_ammo: list[dict]
         "seller_closing": False,      # Arjun said he accepts; Neha's next turn must confirm or object
         "sales_posts_since_decision": None,  # Arjun's Boardroom messages since the latest decision
         "procurement_offers": [],     # the rate Neha named in each message (None when none): is she moving?
+        "procurement_payment_days": [],  # payment days Neha asked for / accepted per message (None when none)
+        "sales_payment_days": [],     # payment days each of Arjun's posted offers was for (None when none)
+        # Neha's escalations (2026-10-31), the mirror of Arjun's. decision_event / pending_decision are shared:
+        # only one side can be waiting (turns alternate); `escalating_side` says which.
+        "escalating_side": None,
+        "procurement_escalations": [],          # {"question", "decision"} per escalation
+        "procurement_overrides": [],            # her manager's decisions (Absolute Override Commands)
+        "procurement_escalation_cooldown": False,
+        "procurement_deadlock_baseline": 0,     # index into procurement_offers where deadlock measuring restarts
+        "procurement_posts_since_decision": None,
     }
 
 
-# ------------------------------------------------------- Simulation loop
+# ------------------------------------------------------- Negotiation loop
 
 
 async def notify(bot: Bot, chat_id: int | None, text: str, html: bool = False,
                  reply_markup: InlineKeyboardMarkup | None = None) -> None:
-    """Best-effort side-channel message; a failed notice must not kill the match."""
+    """Side-channel message (War Room DMs, 🧠 alerts and approvals, reports, Boardroom notices).
+
+    Network blips are retried NOTIFY_RETRIES times (2026-10-30: a DM and a Boardroom closing notice were lost
+    to one TLS error each). Other Telegram errors (blocked, bad request) are not retried. A notice that still
+    fails is logged and never kills the match.
+    """
     if chat_id is None:
         return
-    try:
-        await bot.send_message(chat_id, text, parse_mode=ParseMode.HTML if html else None,
-                               reply_markup=reply_markup)
-    except TelegramError:
-        logger.warning("Could not notify chat %s", chat_id, exc_info=True)
+    for delay in (*([NOTIFY_RETRY_DELAY_S] * NOTIFY_RETRIES), None):
+        try:
+            await bot.send_message(chat_id, text, parse_mode=ParseMode.HTML if html else None,
+                                   reply_markup=reply_markup)
+            return
+        except NetworkError as e:  # includes TimedOut; BadRequest subclasses it but won't fix itself
+            if isinstance(e, BadRequest) or delay is None:
+                logger.warning("Could not notify chat %s", chat_id, exc_info=True)
+                return
+            logger.warning("Notify %s failed (%s); retrying in %.0fs.", chat_id, type(e).__name__, delay)
+            await asyncio.sleep(delay)
+        except TelegramError:
+            logger.warning("Could not notify chat %s", chat_id, exc_info=True)
+            return
 
 
 async def typing(bot: Bot, chat_id: int) -> None:
@@ -361,11 +406,23 @@ async def debrief(match: dict, sales_bot: Bot, proc_bot: Bot, loop_task: asyncio
     try:
         tiers = await fetch_cpq_tiers()
         terms = await reports.extract_terms(match)
+        war_rooms = {"sales": (sales_bot, match["sales_war_room_chat_id"]),
+                     "procurement": (proc_bot, match["procurement_war_room_chat_id"])}
+
+        async def playbook_alert(side: str, text: str, pending_id: int | None = None) -> None:
+            bot, chat_id = war_rooms[side]
+            await notify(bot, chat_id, text, html=True, reply_markup=lesson_markup(pending_id))
+
         try:
-            outcomes = await post_match.run_judge_agent(match_id)
+            outcomes = await post_match.run_judge_agent(match_id, notify=playbook_alert)
         except Exception:
             logger.exception("Judge failed for match %s", match_id)
             outcomes = None
+        proposals = post_match.proposal_ids(outcomes)
+        sides = {o.heuristic_id: o.side for o in outcomes or [] if o.action == "proposed"}
+        for pending_id in proposals:  # stored first, so a restart can still send the approval request
+            if chat_id := war_rooms[sides[pending_id]][1]:
+                await db_init.update_pending(pending_id, war_room_chat_id=chat_id)
         await notify(proc_bot, match["procurement_war_room_chat_id"],
                      reports.procurement_report(match, terms, tiers, outcomes), html=True)
         await notify(sales_bot, match["sales_war_room_chat_id"],
@@ -374,6 +431,41 @@ async def debrief(match: dict, sales_bot: Bot, proc_bot: Bot, loop_task: asyncio
         logger.exception("Debrief failed for match %s", match_id)
         await notify(sales_bot, match["sales_war_room_chat_id"],
                      "The negotiation has closed, but the report could not be prepared this time.")
+        return
+    # Shadow regression gate: test each proposal headless, then ask the coach (can take a while; the
+    # live playbook is unchanged meanwhile).
+    if proposals:
+        try:
+            await post_match.review_proposals(proposals, notify=playbook_alert)
+        except Exception:
+            logger.exception("Shadow review failed for proposals %s (match %s)", proposals, match_id)
+
+
+def lesson_markup(pending_id: int | None) -> InlineKeyboardMarkup | None:
+    """✅ Approve / ❌ Reject under a 🧠 playbook approval request (None for a plain alert)."""
+    if pending_id is None:
+        return None
+    return InlineKeyboardMarkup([[InlineKeyboardButton("✅ Approve", callback_data=f"lesson:ok:{pending_id}"),
+                                  InlineKeyboardButton("❌ Reject", callback_data=f"lesson:no:{pending_id}")]])
+
+
+async def resume_proposals(sales_bot: Bot, proc_bot: Bot) -> None:
+    """At startup: shadow-test and send the approval requests a restart interrupted (pending, never sent)."""
+    rows = [r for r in await db_init.fetch_unsent_pending() if r["war_room_chat_id"]]
+    if not rows:
+        return
+    logger.info("Resuming %d playbook proposal(s) whose approval request was never sent: %s",
+                len(rows), [r["pending_id"] for r in rows])
+    bots = {"sales": sales_bot, "procurement": proc_bot}
+    chats = {r["pending_id"]: r["war_room_chat_id"] for r in rows}
+
+    async def send(side: str, text: str, pending_id: int | None = None) -> None:
+        await notify(bots[side], chats.get(pending_id), text, html=True, reply_markup=lesson_markup(pending_id))
+
+    try:
+        await post_match.review_proposals(list(chats), notify=send)
+    except Exception:
+        logger.exception("Resuming proposals %s failed", list(chats))
 
 
 async def apply_executed(match: dict, side: str, executed_ids: list[int], bot: Bot, war_room: int | None) -> None:
@@ -440,6 +532,19 @@ def buyer_position(match: dict) -> tuple[float | None, bool, bool]:
     return latest, meets, moving
 
 
+def last_text(match: dict, role: str) -> str:
+    """The latest Boardroom message by `role` ("sales" | "procurement"), or ''."""
+    return next((t["text"] for t in reversed(match["transcript"]) if t["role"] == role), "")
+
+
+def payment_gap(match: dict) -> str:
+    """'60 vs 30 days' when Neha's latest payment ask is longer than Arjun's latest stated terms, else ''.
+    Both come from the agents' JSON (`payment_days`); unknown on either side = no gap claimed."""
+    neha = _last_priced(match.get("procurement_payment_days", []))
+    arjun = _last_priced(match.get("sales_payment_days", []))
+    return f"{neha} vs {arjun} days" if neha is not None and arjun is not None and neha > arjun else ""
+
+
 def deadlock_forced(match: dict) -> bool:
     """True when the deadlock is past the backstop thresholds (since the last decision)."""
     _, meets, moving = buyer_position(match)
@@ -488,22 +593,35 @@ def deadlock_facts(match: dict, first_person: bool = False) -> str:
     return "; ".join(facts)
 
 
-async def escalate(match: dict, sales_bot: Bot, question: str) -> bool:
-    """Two-way escalation: hold the Boardroom, ask the manager in the Sales War Room, wait for the answer.
+# Per side: (escalations list, overrides list, cooldown flag, deadlock baseline, offers list, posts counter,
+# War Room chat id key, status to return to). The keys of the match dict each side's escalation uses.
+ESCALATION_KEYS = {
+    "sales": ("escalations", "manager_overrides", "escalation_cooldown", "deadlock_baseline", "sales_offers",
+              "sales_posts_since_decision", "sales_war_room_chat_id", "AWAITING_SALES"),
+    "procurement": ("procurement_escalations", "procurement_overrides", "procurement_escalation_cooldown",
+                    "procurement_deadlock_baseline", "procurement_offers", "procurement_posts_since_decision",
+                    "procurement_war_room_chat_id", "AWAITING_PROCUREMENT"),
+}
+
+
+async def escalate(match: dict, bot: Bot, question: str, side: str = "sales") -> bool:
+    """Two-way escalation: hold the Boardroom, ask that side's manager in its War Room, wait for the answer.
 
     Nothing is posted to the Boardroom. The answer becomes an Absolute Override Command for the rest of
     the match. Both the question and the answer go to the ledger, so the Judge can turn the deadlock
     into a lesson. Returns False if the match ended while waiting.
     """
+    escalations, overrides, cooldown, baseline, offers, posts, chat_key, resume = ESCALATION_KEYS[side]
+    asked, decided = ESCALATION_SPEAKERS[side]
     match["status"] = "AWAITING_MANAGER_APPROVAL"
+    match["escalating_side"] = side
     match["pending_decision"] = None
     match["decision_event"].clear()
     entry = {"question": question, "decision": None}
-    match["escalations"].append(entry)
-    await log_message(match["match_id"], "Sales_Escalation", question)
-    logger.info("Match %s: Arjun escalated: %s", match["match_id"], question)
-    await notify(sales_bot, match["sales_war_room_chat_id"], ESCALATION_DM.format(question=question),
-                 reply_markup=ESCALATION_MENU)
+    match[escalations].append(entry)
+    await log_message(match["match_id"], asked, question)
+    logger.info("Match %s: %s escalated: %s", match["match_id"], AGENT_NAMES[side], question)
+    await notify(bot, match[chat_key], ESCALATION_DMS[side].format(question=question), reply_markup=ESCALATION_MENU)
 
     try:
         await asyncio.wait_for(match["decision_event"].wait(), timeout=APPROVAL_TIMEOUT_S)
@@ -515,17 +633,61 @@ async def escalate(match: dict, sales_bot: Bot, question: str) -> bool:
     decision = match["pending_decision"]
     if decision:
         entry["decision"] = decision
-        match["manager_overrides"].append(decision)
-        match["sales_posts_since_decision"] = 0
-        await log_message(match["match_id"], "Manager_Decision", decision)
-        logger.info("Match %s: manager decided: %s", match["match_id"], decision)
-    else:  # no answer in time: Arjun carries on alone, within his limits
+        match[overrides].append(decision)
+        match[posts] = 0
+        await log_message(match["match_id"], decided, decision)
+        logger.info("Match %s: %s's manager decided: %s", match["match_id"], AGENT_NAMES[side], decision)
+    else:  # no answer in time: the agent carries on alone, within its limits
         logger.info("Match %s: no manager decision within %.0fs.", match["match_id"], APPROVAL_TIMEOUT_S)
-        await notify(sales_bot, match["sales_war_room_chat_id"], ESCALATION_TIMEOUT_DM)
-    match["escalation_cooldown"] = True  # his next message must be a reply, not another question
-    match["deadlock_baseline"] = len(match["sales_offers"])  # measure any new deadlock from here
-    match["status"] = "AWAITING_SALES"
+        await notify(bot, match[chat_key], ESCALATION_TIMEOUT_DMS[side])
+    match[cooldown] = True  # the next message must be a reply, not another question
+    match[baseline] = len(match[offers])  # measure any new deadlock from here
+    match["escalating_side"] = None
+    match["status"] = resume
     return True
+
+
+def procurement_escalations_left(match: dict) -> int:
+    """How many more times Neha may ask her manager this turn (0 = escalation not offered)."""
+    neha_messages = sum(t["role"] == "procurement" for t in match["transcript"])
+    if match["procurement_escalation_cooldown"] or neha_messages < negotiation.MIN_PROCUREMENT_MESSAGES_BEFORE_ESCALATION:
+        return 0
+    return max(0, negotiation.MAX_ESCALATIONS_PER_MATCH - len(match["procurement_escalations"]))
+
+
+def procurement_deadlock(match: dict, first_person: bool = False) -> tuple[str, bool]:
+    """(Measured deadlock facts for Neha's prompt or her question, whether the backstop applies).
+
+    The mirror of deadlock_facts / deadlock_forced, counted since her manager's last decision: her own rate
+    repeated while SwiftRoute's rate for her term stays above it, or many of her messages without agreement.
+    SwiftRoute moving down toward her is not a deadlock.
+    """
+    you, your = ("I", "my") if first_person else ("you", "your")
+    sellers = [p for p in match["sales_offers"] if p is not None]
+    if len(sellers) >= 2 and sellers[-1] < sellers[-2]:
+        return "", False
+    offers = match["procurement_offers"][match["procurement_deadlock_baseline"]:]
+    priced = [p for p in offers if p is not None]
+    repeats = next((i for i, p in enumerate(reversed(priced)) if p != priced[-1]), len(priced)) if priced else 0
+    arjun = arjun_rate_for_buyer_term(match)
+    meets = bool(priced) and arjun is not None and arjun <= priced[-1]  # he already meets her rate
+    facts = []
+    if repeats >= DEADLOCK_REPEATS and not meets:
+        facts.append(f"{you} have asked for {negotiation.fmt_rate(priced[-1])}/parcel in {your} last {repeats} "
+                     "messages and SwiftRoute has not accepted")
+    if len(offers) >= DEADLOCK_MESSAGES:
+        facts.append(f"{len(offers)} of {your} messages without an agreement")
+    forced = bool(facts) and ((repeats >= DEADLOCK_FORCE_REPEATS and not meets) or len(offers) >= DEADLOCK_FORCE_MESSAGES)
+    return "; ".join(facts), forced
+
+
+def procurement_deadlock_question(match: dict) -> str:
+    """The backstop question, when Neha was required to escalate but did not."""
+    facts, _ = procurement_deadlock(match, first_person=True)
+    last = last_text(match, "sales")
+    quote = f" Arjun's latest: “{last[:220]}{'…' if len(last) > 220 else ''}”" if last else ""
+    return (f"We're deadlocked: {facts}.{quote} Should I close the deal no matter what, "
+            "or hold our price and walk away if he refuses?")
 
 
 def is_conditional_walk(decision: str) -> bool:
@@ -550,7 +712,13 @@ def walk_block(match: dict, lessons: list[dict], tried: set[str]) -> str | None:
     (No "small gap" close: the coach dropped it on 2026-10-27, a ₹1 gap is millions over a contract.)
     """
     if "meets" not in tried and buyer_position(match)[1] and meets_key(match) not in match.get("meets_noted", ()):
-        return "meets"
+        if payment_gap(match):
+            # Live 2026-10-30 (match bc8aed9bc422): she met his ₹41 but still wanted 60 days; the "close at
+            # your price" rewrite made him concede 60 days against a CRITICAL lesson. Price alone is not a deal.
+            logger.info("Match %s: buyer meets the price but wants longer payment terms (%s); no close nudge.",
+                        match["match_id"], payment_gap(match))
+        else:
+            return "meets"
     overrides = match["manager_overrides"]
     if not (overrides or any(h.get("is_critical") for h in lessons)):
         return "unauthorised"
@@ -628,26 +796,51 @@ async def run_match(group_id: int, sales_bot: Bot, proc_bot: Bot) -> None:
 
             if match["status"] == "AWAITING_PROCUREMENT":
                 lessons: list[dict] = []
+                p_deadlock, p_forced = procurement_deadlock(match)
+                p_left = procurement_escalations_left(match)
+                p_must = p_forced and p_left > 0
 
                 async def generate_procurement():
                     await typing(proc_bot, group_id)
                     # Symmetrical JIT: Sales's tags (max 2) select Procurement's master lessons for this turn.
                     # Parked while SELF_PLAY is off: Neha plays without learned lessons (a fixed opponent).
-                    friction = match["sales_friction_points"]
-                    lessons[:] = await fetch_heuristics("procurement", friction) if negotiation.SELF_PLAY else []
+                    friction = negotiation.retrieval_tags(match["sales_friction_points"], last_text(match, "sales"))
+                    lessons[:] = await fetch_heuristics(
+                        "procurement", friction + list(negotiation.ALWAYS_LOADED_TAGS)) if negotiation.SELF_PLAY else []
                     return await negotiation.procurement_turn(
                         match["transcript"], match["mandate"], match["procurement_ammo"],
                         match["procurement_coaching_directives"], lessons, friction,
                         seller_closing=match.get("seller_closing", False),
+                        overrides=match["procurement_overrides"], escalations_left=p_left,
+                        manager=COACH_NAME or "your manager", deadlock=p_deadlock, must_escalate=p_must,
                     )
 
                 turn = await next_turn(match, "procurement", generate_procurement)
                 if turn is None:
                     return
+                if p_must and not (turn.escalation or turn.outcome):
+                    # Backstop, as for Arjun: she was required to ask but repeated herself. Her draft is not
+                    # posted; the system asks her manager on her behalf with the measured facts.
+                    logger.info("Match %s: deadlock backstop, escalating for Neha.", match["match_id"])
+                    turn.escalation = procurement_deadlock_question(match)
+                if turn.escalation:
+                    # Nothing goes to the Boardroom; ask the Procurement War Room and wait.
+                    if not await escalate(match, proc_bot, turn.escalation, side="procurement"):
+                        return  # the match ended while waiting
+                    continue      # Neha now writes her Boardroom reply under the decision
+                match["procurement_escalation_cooldown"] = False
+                p_over = match["procurement_overrides"]
+                if (turn.outcome == "buyer walked away" and p_over and match["procurement_posts_since_decision"] == 0
+                        and is_conditional_walk(p_over[-1])):
+                    # "Hold..., walk away if they refuse": this message states her final terms; the walk only
+                    # counts after SwiftRoute has answered them.
+                    logger.info("Match %s: Neha's walk-away ignored: final terms come first.", match["match_id"])
+                    turn.outcome = None
                 heuristics = lessons
                 await post(match, group_id, proc_bot, "procurement", turn.text)
                 match["procurement_friction_points"] = turn.friction_points
                 match["procurement_offers"].append(turn.proposed_price)
+                match["procurement_payment_days"].append(turn.payment_days)
                 # Neha's private reasoning stays in the server log; her boss gets one report at the end.
                 logger.info("Procurement note: %s | tags: %s | lessons used: %s", turn.internal_note,
                             turn.friction_points, [h["topic_tag"] for h in heuristics])
@@ -667,6 +860,8 @@ async def run_match(group_id: int, sales_bot: Bot, proc_bot: Bot) -> None:
                 # Two-sided close: Neha's acceptance only counts once Arjun confirms it (she sometimes
                 # "accepts" while attaching new conditions). His next turn gets a closing check.
                 match["buyer_closing"] = turn.outcome == "deal closed"
+                if match["procurement_posts_since_decision"] is not None:
+                    match["procurement_posts_since_decision"] += 1
                 match["status"] = "AWAITING_SALES"
             else:
                 lessons = []
@@ -677,8 +872,10 @@ async def run_match(group_id: int, sales_bot: Bot, proc_bot: Bot) -> None:
                 async def generate_sales():
                     await typing(sales_bot, group_id)
                     # Symmetrical JIT: Procurement's tags (max 2) select Sales's master lessons for this turn.
-                    friction = match["procurement_friction_points"]
-                    lessons[:] = await fetch_heuristics("sales", friction)
+                    # Her self-tags plus a keyword scan of her message (2026-10-31: she often forgets a tag).
+                    friction = negotiation.retrieval_tags(match["procurement_friction_points"],
+                                                          last_text(match, "procurement"))
+                    lessons[:] = await fetch_heuristics("sales", friction + list(negotiation.ALWAYS_LOADED_TAGS))
                     return await negotiation.sales_turn(
                         match["transcript"], match["active_coaching_directives"], lessons, friction,
                         coach_floor=match["coach_floor"], ammo=match["sales_ammo"],
@@ -736,6 +933,7 @@ async def run_match(group_id: int, sales_bot: Bot, proc_bot: Bot) -> None:
                 # Facts for the end-of-negotiation report.
                 match["sales_offers"].append(turn.proposed_price)
                 match["sales_offer_months"].append(turn.contract_months)
+                match["sales_payment_days"].append(turn.payment_days)
                 match["rto_offered"] |= turn.offers_rto_waiver
                 match["playbook_topics"].update(h["topic_tag"] for h in heuristics)
                 match["blocked_count"] += sum(getattr(v, "note", "") not in ("", negotiation.COPY_NOTE)
@@ -970,15 +1168,26 @@ async def _buffer(update: Update, side: str) -> None:
         )
         return
     text = update.message.text
-    if side == "sales" and match["status"] == "AWAITING_MANAGER_APPROVAL":
-        # Arjun asked a question: this reply is the decision (an Absolute Override), not a whisper.
+    if match["status"] == "AWAITING_MANAGER_APPROVAL" and (match.get("escalating_side") or "sales") == side:
+        # This side's agent asked a question: the reply is the decision (an Absolute Override), not a whisper.
         take_decision(match, text)
-        await update.message.reply_text(DECISION_ACK.format(decision=text.strip()))
+        await update.message.reply_text(DECISION_ACKS[side].format(decision=text.strip()))
         return
+    await add_whisper(match, side, text)
+    await update.message.reply_text(WHISPER_ACK[side])
+
+
+async def add_whisper(match: dict, side: str, text: str, setup: bool = False) -> None:
+    """Queue coaching for `side`'s agent (pending until it fits the conversation) and log it for the Judge.
+
+    `setup`: a start-of-match initialization note (e.g. the test brief). The agent gets it like any note, but
+    the ledger row carries post_match.SETUP_NOTE_PREFIX so the Judge never turns it into a lesson.
+    """
+    _, key, speaker = WHISPER_ROUTES[side]
     match[key].append({"text": text, "status": negotiation.PENDING})
     match["coaching_rev"][side] += 1  # a reply held by /pause will be rewritten with this in mind
-    await log_message(match["match_id"], speaker, text)  # the Judge learns from it after the match
-    await update.message.reply_text(WHISPER_ACK[side])
+    logged = f"{post_match.SETUP_NOTE_PREFIX}{text}" if setup else text
+    await log_message(match["match_id"], speaker, logged)  # the Judge learns from in-match notes after the match
 
 
 async def buffer_whisper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1060,7 +1269,9 @@ def status_text(chat, side: str = "sales") -> str:
     if not match:
         return "No negotiation yet. Tap Start negotiation in the Boardroom group to begin."
 
-    state = STATUS_LABELS[match["status"]]
+    waiting = match.get("escalating_side") or "sales"
+    state = STATUS_LABELS[match["status"]].format(name=AGENT_NAMES[waiting],
+                                                  their="his" if waiting == "sales" else "her")
     if match["paused"] and match["status"] != "ENDED":
         state = "⏸ Paused: tap Resume to continue"
     if match["end_code"]:
@@ -1078,11 +1289,14 @@ def status_text(chat, side: str = "sales") -> str:
         lines += [f"  • {text}" for text in standing]
         if side == "sales" and match["coach_floor"] is not None:
             lines.append(f"🔒 Your floor: {negotiation.fmt_rate(match['coach_floor'])}/parcel")
-        if side == "sales" and match["status"] == "AWAITING_MANAGER_APPROVAL" and match["escalations"]:
-            lines.append(f"\n🙋 Arjun is waiting for your decision:\n{match['escalations'][-1]['question']}")
-        if side == "sales" and match["manager_overrides"]:
+        escalations, overrides = ESCALATION_KEYS[side][:2]
+        if (match["status"] == "AWAITING_MANAGER_APPROVAL" and (match.get("escalating_side") or "sales") == side
+                and match[escalations]):
+            who = "Arjun is" if side == "sales" else "I'm"
+            lines.append(f"\n🙋 {who} waiting for your decision:\n{match[escalations][-1]['question']}")
+        if match[overrides]:
             lines.append("Your decisions in force:")
-            lines += [f"  • {d}" for d in match["manager_overrides"]]
+            lines += [f"  • {d}" for d in match[overrides]]
     return "\n".join(lines)
 
 
@@ -1191,7 +1405,8 @@ async def sales_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await query.answer(reply or "Negotiation closed.", show_alert=reply == "There's no negotiation in progress.")
     elif data in ("esc:close", "esc:hold"):
         match = active_matches.get(war_room_to_group.get(chat.id)) if private else None
-        if not match or match["status"] != "AWAITING_MANAGER_APPROVAL":
+        if (not match or match["status"] != "AWAITING_MANAGER_APPROVAL"
+                or (match.get("escalating_side") or "sales") != "sales"):
             await query.answer("Arjun isn't waiting for a decision right now.", show_alert=True)
             return
         decision = DECISION_CLOSE if data == "esc:close" else DECISION_HOLD
@@ -1222,10 +1437,51 @@ async def sales_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await query.answer()
 
 
-async def proc_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Inline buttons in the Procurement War Room (status and clearing)."""
+LESSON_ANSWERS = {
+    "approved": "✅ Approved. The playbook now uses the proposed lesson.",
+    "rejected": "❌ Rejected. The current lesson stays; the proposal was discarded.",
+    "stale": "This lesson changed after the proposal was made, so it was not applied. The current lesson stays.",
+    "superseded": "A newer proposal on this topic replaced this one, so nothing was changed. "
+                  "Please answer the newer request.",
+    "missing": "That proposal no longer exists.",
+}
+
+
+async def answer_lesson(pending_id: int, approve: bool) -> str:
+    """Apply the coach's answer to a playbook proposal; returns the line to show them."""
+    status, row = await db_init.resolve_pending(pending_id, approve)
+    if row is not None and status in ("approved", "rejected", "stale"):
+        logger.info("Playbook proposal #%d [%s %s]: %s", pending_id, row["side"], row["topic_tag"], status)
+    if status == "superseded" or (status in LESSON_ANSWERS and (row is None or row["status"] == "pending")):
+        return LESSON_ANSWERS[status]
+    return f"Already answered earlier ({status})."
+
+
+async def lesson_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """✅ Approve / ❌ Reject under a 🧠 'Playbook Update Proposed' request (both War Rooms)."""
     query = update.callback_query
-    if query.data == "menu:status":
+    _, verdict, pending_id = query.data.split(":")
+    line = await answer_lesson(int(pending_id), verdict == "ok")
+    await query.answer(line[:200])
+    try:  # replace the buttons with the outcome, so the decision is visible in the chat history
+        await query.edit_message_text(f"{query.message.text_html}\n\n<b>{line}</b>", parse_mode=ParseMode.HTML)
+    except TelegramError:
+        await notify(context.bot, query.message.chat.id, line)
+
+
+async def proc_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Inline buttons in the Procurement War Room (status, clearing, and answers to Neha's escalations)."""
+    query = update.callback_query
+    if query.data in ("esc:close", "esc:hold"):
+        match = active_matches.get(proc_war_room_to_group.get(query.message.chat.id))
+        if not match or match["status"] != "AWAITING_MANAGER_APPROVAL" or match.get("escalating_side") != "procurement":
+            await query.answer("I'm not waiting for a decision right now.", show_alert=True)
+            return
+        decision = DECISION_CLOSE if query.data == "esc:close" else DECISION_HOLD
+        take_decision(match, decision)
+        await query.answer("Decision sent.")
+        await notify(context.bot, query.message.chat.id, DECISION_ACKS["procurement"].format(decision=decision))
+    elif query.data == "menu:status":
         await query.answer()
         await notify(context.bot, query.message.chat.id, status_text(query.message.chat, side="procurement"))
     elif query.data == "menu:clear":
@@ -1284,6 +1540,8 @@ def build_apps() -> tuple[Application, Application]:
         sales.add_handler(CommandHandler(names, group_command(handler)))  # groups + Sales War Room
         proc.add_handler(CommandHandler(names, group_command(handler), filters=groups))
     sales.add_handler(CommandHandler("floor", set_floor))
+    for app in (sales, proc):  # registered first: the generic button handlers below accept any data
+        app.add_handler(CallbackQueryHandler(lesson_buttons, pattern=r"^lesson:(ok|no):\d+$"))
     sales.add_handler(CallbackQueryHandler(sales_buttons))
     sales.add_handler(MessageHandler(
         private & filters.UpdateType.MESSAGE & filters.TEXT & ~filters.COMMAND, buffer_whisper
@@ -1332,6 +1590,92 @@ async def initialize_with_retry(apps: tuple[Application, Application]) -> None:
             await asyncio.sleep(delay)
 
 
+# ------------------------------------------------- Test control (off by default)
+# With ZEROLEAK_TEST_CONTROL=1 a tester (e.g. Claude Code) drives live matches by dropping JSON files into
+# data\control\ instead of typing in Telegram. Everything still runs through the real bots, so the chats
+# show the match as usual, and every injected note is echoed into the DM it stands in for.
+#   {"cmd": "start", "boardroom": -100..., "coach": 123, "neha_note": "...", "arjun_note": "..."}
+#   {"cmd": "whisper", "side": "sales" | "procurement", "text": "..."}
+#   {"cmd": "decision", "text": "..."}     (answers whichever agent is waiting: Arjun or Neha)
+#   {"cmd": "end"}
+#   {"cmd": "lesson", "id": 3, "approve": true, "coach": 123}   (answers a 🧠 playbook proposal)
+CONTROL_DIR = Path(__file__).resolve().parent.parent / "data" / "control"
+CONTROL_POLL_S = 1.0
+
+
+def _live_match() -> tuple[int, dict] | tuple[None, None]:
+    for group_id, match in active_matches.items():
+        if match["status"] != "ENDED":
+            return group_id, match
+    return None, None
+
+
+async def _control_note(match: dict, side: str, text: str, sales_bot: Bot, proc_bot: Bot,
+                        setup: bool = False) -> None:
+    await add_whisper(match, side, text, setup=setup)
+    bot, chat_id = ((sales_bot, match["sales_war_room_chat_id"]) if side == "sales"
+                    else (proc_bot, match["procurement_war_room_chat_id"]))
+    await notify(bot, chat_id, f"🧪 Test note sent on your behalf: “{text}”\n{WHISPER_ACK[side]}")
+
+
+async def run_control_command(cmd: dict, sales_app: Application) -> None:
+    sales_bot, proc_bot = sales_app.bot_data["sales_bot"], sales_app.bot_data["proc_bot"]
+    kind = cmd.get("cmd")
+    if kind == "lesson":  # {"cmd": "lesson", "id": 3, "approve": true}: same as tapping the button
+        line = await answer_lesson(int(cmd["id"]), bool(cmd.get("approve")))
+        logger.info("Test control: lesson #%s -> %s", cmd["id"], line)
+        await notify(sales_bot, int(cmd["coach"]) if cmd.get("coach") else None, f"🧪 On your behalf: {line}")
+        return
+    if kind == "start":
+        chat = await sales_bot.get_chat(int(cmd["boardroom"]))
+        context = SimpleNamespace(application=sales_app)
+        problem = await begin_negotiation(context, chat, SimpleNamespace(id=int(cmd["coach"])))
+        if problem:
+            logger.warning("Test control: start refused: %s", problem)
+            return
+        match = active_matches[chat.id]
+        for side, key in (("procurement", "neha_note"), ("sales", "arjun_note")):
+            if cmd.get(key):
+                await _control_note(match, side, cmd[key], sales_bot, proc_bot, setup=True)  # match brief
+        logger.info("Test control: started match %s", match["match_id"])
+        return
+    group_id, match = _live_match()
+    if match is None:
+        logger.warning("Test control: no live match for %s", cmd)
+    elif kind == "whisper":
+        await _control_note(match, cmd["side"], cmd["text"], sales_bot, proc_bot)
+    elif kind == "decision":
+        if match["status"] != "AWAITING_MANAGER_APPROVAL":
+            logger.warning("Test control: decision sent but no agent is waiting for one")
+            return
+        side = match.get("escalating_side") or "sales"
+        take_decision(match, cmd["text"])
+        bot, chat_id = ((sales_bot, match["sales_war_room_chat_id"]) if side == "sales"
+                        else (proc_bot, match["procurement_war_room_chat_id"]))
+        await notify(bot, chat_id,
+                     f"🧪 Test decision sent on your behalf.\n{DECISION_ACKS[side].format(decision=cmd['text'].strip())}")
+    elif kind == "end":
+        await finish_match(match, group_id, sales_bot, proc_bot, "coach")
+    else:
+        logger.warning("Test control: unknown command %s", cmd)
+
+
+async def control_inbox(sales_app: Application) -> None:
+    CONTROL_DIR.mkdir(parents=True, exist_ok=True)
+    logger.info("Test control ON: watching %s", CONTROL_DIR)
+    while True:
+        for path in sorted(CONTROL_DIR.glob("*.json")):
+            try:
+                cmd = json.loads(path.read_text(encoding="utf-8"))
+                path.unlink()
+                logger.info("Test control: %s", cmd.get("cmd"))
+                await run_control_command(cmd, sales_app)
+            except Exception:
+                logger.exception("Test control: command %s failed", path.name)
+                path.unlink(missing_ok=True)
+        await asyncio.sleep(CONTROL_POLL_S)
+
+
 async def run(stop_event: asyncio.Event | None = None) -> None:
     """Start both bots and poll until `stop_event` is set (or the task is cancelled)."""
     await init_db()
@@ -1345,6 +1689,15 @@ async def run(stop_event: asyncio.Event | None = None) -> None:
         await asyncio.gather(*(app.updater.start_polling(drop_pending_updates=True) for app in apps))
         logger.info("Live: Sales @%s | Procurement @%s", sales.bot.username, proc.bot.username)
         logger.info("Start a match from the Boardroom menu (Start negotiation button or /start_negotiation).")
+        logger.info("Self-play (Neha learns): %s", "ON" if negotiation.SELF_PLAY else "OFF")
+        shadow = post_match.shadow_test.SHADOW_MATCHES
+        logger.info("Playbook changes: staged for approval; shadow test %s",
+                    f"{shadow} matches per side" if shadow > 0 else "OFF")
+        if os.getenv("ZEROLEAK_TEST_CONTROL", "").strip() == "1":
+            in_background(control_inbox(sales))
+        resume = asyncio.create_task(resume_proposals(sales.bot, proc.bot))
+        judge_tasks.add(resume)
+        resume.add_done_callback(judge_tasks.discard)
         await (stop_event or asyncio.Event()).wait()
     finally:
         tasks = list(match_tasks.values())

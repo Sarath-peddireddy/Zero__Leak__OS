@@ -11,12 +11,17 @@ from types import SimpleNamespace as NS
 PROJECT = Path(__file__).resolve().parent.parent
 SCRATCH = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT / "src"))
+import os  # noqa: E402
+# .env may hold dev settings: a test never starts real shadow matches (Gemini), and pins self-play.
+os.environ.setdefault("ZEROLEAK_SHADOW_MATCHES", "0")
+os.environ.setdefault("ZEROLEAK_SELF_PLAY", "0")
 
 import db_init  # noqa: E402
 
 TEST_DB = SCRATCH / "test_1026.db"
 shutil.copy(PROJECT / "data" / "zeroleak.db", TEST_DB)
 db_init.DB_PATH = TEST_DB
+asyncio.run(db_init.init_db())  # migrates the copy (e.g. pending_lessons, added 2026-10-30)
 
 import httpx  # noqa: E402
 from google.genai import errors  # noqa: E402
@@ -199,28 +204,59 @@ check("Arjun: manager decision quoted -> blocked", st.text.startswith("₹42/par
 
 # ================================================================ 5. reports: before -> after
 O = post_match.JudgeOutcome
-outs = [O("w1", "merged", "sales", "Payment_Terms", 5, 75, directive="30 max, 45 for 24m (v1)", previous="30 days max."),
-        O("w2", "merged", "sales", "Price", 8, 85, directive="Hold ₹42.", previous="Hold ₹43."),
-        O("w3", "merged", "sales", "Payment_Terms", 5, 85, directive="30 max, 45 for 24m (v2)", previous="v1"),
-        O("w4", "inserted", "sales", "SLA", 9, None, directive="Cite 99.98%."),
+# 10-31 staging gate: every change is a proposal; two notes on a topic in one match share one proposal
+outs = [O("w1", "proposed", "sales", "Payment_Terms", 5, 75, directive="30 max, 45 for 24m (v2)", previous="30 days max."),
+        O("w2", "proposed", "sales", "Price", 8, 85, directive="Hold ₹42.", previous="Hold ₹43.", reason="it removes 43"),
+        O("w3", "proposed", "sales", "Payment_Terms", 5, 85, directive="30 max, 45 for 24m (v2)", previous="30 days max."),
+        O("w4", "proposed", "sales", "SLA", 9, None, directive="Cite 99.98%."),
         O("w5", "skipped", "sales", reason="LLMError")]
 lines = reports._lesson_lines(outs, "sales")
 text = "\n".join(lines)
 check("one entry per topic", text.count("Payment terms") == 1, text)
-check("before = state before the match, now = latest",
-      "<i>Before:</i> 30 days max." in text and "<i>Now:</i> 30 max, 45 for 24m (v2)" in text and "v1)" not in text, text)
+check("current = live lesson, proposed = final proposal text",
+      "<i>Current:</i> 30 days max." in text and "<i>Proposed:</i> 30 max, 45 for 24m (v2)" in text, text)
 check("note count shown", "from 2 notes" in text, text)
-check("new lesson has no Before line", "Service levels" in text and "Cite 99.98%" in text
-      and text.split("Service levels")[1].count("Before") == 0, text)
+check("new topic shows 'none' as current", "Service levels" in text and "Cite 99.98%" in text
+      and "none (first lesson on this topic)" in text.split("Service levels")[1], text)
+check("risk warning listed + everything waits for approval", "⚠️ it removes 43" in text
+      and text.count("waiting for your OK") == 3 and "until you approve" in text, text)
 check("skipped listed", "Not saved" in text)
 check("html escaped", "&lt;" not in text and "<b>" in text)
 old_rto = run(db_init.fetch_heuristic("sales", "RTO"))["new_directive"]
 SCRIPT["judge"] = [json.dumps({"similarity": 90, "past_mistake": "m", "new_directive": "RTO only for 24 months."})]
-res = run(post_match.compact("sales", "RTO", {"past_mistake": "m", "new_directive": "RTO for 24m"}))
-check("compact merged returns the previous directive", res[0] == "merged" and res[3] == old_rto, res)
+res = run(post_match.compact("sales", "RTO", {"past_mistake": "m", "new_directive": "RTO for 24m"},
+                             note="RTO only for 24 months now, not 18."))
+# 10-30: it removes 18 -> a proposal for the coach, live rule untouched (previous directive still returned)
+check("risky merge -> proposal returns the previous directive", res[0] == "proposed" and res[3] == old_rto
+      and run(db_init.fetch_heuristic("sales", "RTO"))["new_directive"] == old_rto, res)
+run(db_init.resolve_pending(res[1], approve=False))  # keep later checks independent of this proposal
+# 10-30: the merge call sees the coach's note (18 -> 24 bug, match 396808c63f6e); number changes are reported
+merge_prompt = [p for a, p, s_ in CALLS if s_ and "ONE master rule" in s_][-1]
+check("merge call sees the coach's note", 'MANAGER\'S NOTE (the words the lesson came from): "RTO only for 24 months now, '
+      'not 18."' in merge_prompt, merge_prompt[-200:])
+check("number_change: 18 -> 24", post_match.number_change("Below ₹42 only for 18 months.",
+                                                         "Below ₹42 only for 24 months.") == "18 → 24")
+check("number_change: none when every number is kept", post_match.number_change(
+    "Below ₹42 only for 18 months.", "Below ₹42 only for 18 months; ask 24 months on volume.") == "")
+check("number_change: 42.0 == 42, commas ignored",
+      post_match.number_change("₹42 at 1,200,000 parcels", "₹42.0 at 1200000 parcels") == "")
+check("merge prompt has the numbers rule", "SAME condition" in post_match.MERGE_SYSTEM
+      and "extra condition" in post_match.MERGE_SYSTEM)
+def prow(new, prev, reason="", critical=0, note="n"):
+    return {"topic_tag": "Contract_Length", "new_directive": new, "previous_directive": prev, "reason": reason,
+            "is_critical": critical, "source_note": note}
+
+alert = post_match.proposal_alert(prow("Below ₹42 only for 24 months.", "Below ₹42 only for 18 months."), None)
+check("approval request shows a number change + current", "Numbers changed:</b> 18 → 24" in alert
+      and "<b>Current:</b> Below ₹42 only for 18 months." in alert, alert)
+alert = post_match.proposal_alert(prow("Below ₹42 only for 18 months; ask 24 months on volume.",
+                                       "Below ₹42 only for 18 months."), None)
+check("approval request has no number-change line when every number is kept", "Numbers changed" not in alert, alert)
 run(db_init.upsert_heuristic("sales", "SLA", past_mistake="x", new_directive="y")) if False else None
 res = run(post_match.compact("sales", "Volume", {"past_mistake": "m", "new_directive": "Ask for volume tiers."}))
-check("compact inserted returns no previous", res[0] == "inserted" and res[3] == "", res)
+check("compact: new topic is staged too (no merge call), previous ''", res[0] == "proposed" and res[3] == ""
+      and run(db_init.fetch_heuristic("sales", "Volume")) is None, res)
+run(db_init.resolve_pending(res[1], approve=False))
 
 # Neha's report: learning line while parked
 match = {"procurement_coaching_directives": dirs, "mandate": mandate, "transcript": transcript,
@@ -229,7 +265,7 @@ try:
     terms = reports.DealTerms()
     neha = reports.procurement_report(match, terms, run(db_init.fetch_cpq_tiers()), [])
     check("Neha's report explains her learning is off", "My learning is switched off for now" in neha
-          and "Lessons I keep" not in neha, neha[-400:])
+          and "Playbook changes proposed" not in neha, neha[-400:])
 except Exception as e:  # report needs more match fields than this stub has
     check("Neha's report explains her learning is off", False, repr(e))
 

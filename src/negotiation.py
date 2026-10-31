@@ -24,10 +24,10 @@ Coaching directives (whispers), the same for both agents:
   standing_policy   -> once acted on, kept in "Manager's Guardrails" at the
                        bottom of that agent's prompt for the rest of the match.
 
-Two-way escalation: when stuck, Arjun may set "requires_manager_approval" and ask
-his manager a question instead of replying (sales_turn returns `escalation`). The
-manager's answer comes back as an Absolute Override Command at the very bottom of
-his prompt. "Close the deal no matter what" -> accept the buyer's terms (hard limits
+Two-way escalation, both agents (Neha since 2026-10-31): when stuck, an agent may set
+"requires_manager_approval" and ask its manager a question instead of replying
+(sales_turn / procurement_turn return `escalation`). The manager's answer comes back
+as an Absolute Override Command at the very bottom of that agent's prompt. "Close the deal no matter what" -> accept the buyer's terms (hard limits
 still apply); "Hold the price, if they don't agree, walk away" -> final terms, then
 "walk_away" if rejected.
 
@@ -49,15 +49,16 @@ from db_init import fetch_cpq_tiers
 
 logger = logging.getLogger("zeroleak.negotiation")
 
-# Phase B (Adversarial Self-Play, see ROADMAP.md) is parked: Neha stays a fixed sparring partner, so
+# Phase B (Adversarial Self-Play, see ROADMAP.md) is parked: Neha keeps a fixed strategy, so
 # any change in Arjun's play comes from Arjun's own learning. Her tables, whispers and tags still
 # work; only her learning loop (Judge -> procurement_heuristics -> her prompt) is off.
 # Set ZEROLEAK_SELF_PLAY=1 to switch it back on.
 SELF_PLAY = os.getenv("ZEROLEAK_SELF_PLAY", "").strip() == "1"
 
-# Two-way escalation: Arjun may ask his manager for a decision instead of replying.
-MAX_ESCALATIONS_PER_MATCH = 3
+# Two-way escalation: either agent may ask its manager for a decision instead of replying.
+MAX_ESCALATIONS_PER_MATCH = 3             # per agent
 MIN_SALES_MESSAGES_BEFORE_ESCALATION = 2  # no asking for help before he has negotiated at all
+MIN_PROCUREMENT_MESSAGES_BEFORE_ESCALATION = 2
 
 MAX_SALES_ATTEMPTS = 3
 MAX_JSON_ATTEMPTS = 2
@@ -98,17 +99,46 @@ STANDING = "standing_policy"
 
 # Shared vocabulary for both agents' friction points and both heuristics tables' topic_tag.
 # The Judge must tag lessons from this same list so lookups match.
-FRICTION_TAGS = ("Price", "RTO", "Payment_Terms", "Contract_Length", "Volume", "SLA", "Competitor_Quote")
+FRICTION_TAGS = ("Price", "RTO", "Payment_Terms", "Contract_Length", "Volume", "SLA", "Competitor_Quote",
+                 "Tech_Integration", "Communication_Tone")
+# Communication_Tone lessons are about HOW to talk, not a lever: they are loaded on every turn.
+ALWAYS_LOADED_TAGS = ("Communication_Tone",)
 _TAG_ALIASES = {
-    "pricing": "Price", "rate": "Price", "rates": "Price", "discount": "Price",
-    "rto_waiver": "RTO", "rto_penalty": "RTO", "rto_penalties": "RTO", "returns": "RTO",
+    "pricing": "Price", "rate": "Price", "rates": "Price", "discount": "Price", "price_floor": "Price",
+    "rto_waiver": "RTO", "rto_penalty": "RTO", "rto_penalties": "RTO", "returns": "RTO", "cod": "RTO",
     "payment": "Payment_Terms", "credit_terms": "Payment_Terms", "credit": "Payment_Terms",
     "contract_term": "Contract_Length", "tenure": "Contract_Length", "lock_in": "Contract_Length",
+    "contract": "Contract_Length", "contract_duration": "Contract_Length", "contract_length_months": "Contract_Length",
     "competitor": "Competitor_Quote", "competition": "Competitor_Quote", "competitor_quotes": "Competitor_Quote",
-    "service_level": "SLA", "sla_uptime": "SLA",
+    "volume_commitment": "Volume", "commitment": "Volume", "growth": "Volume",
+    "service_level": "SLA", "sla_uptime": "SLA", "service": "SLA", "reliability": "SLA",
+    "tech": "Tech_Integration", "integration": "Tech_Integration", "tech_integration": "Tech_Integration",
+    "api": "Tech_Integration", "tracking": "Tech_Integration", "technology": "Tech_Integration",
+    "tone": "Communication_Tone", "communication": "Communication_Tone", "communication_tone": "Communication_Tone",
 }
 _TAG_LOOKUP = {t.lower(): t for t in FRICTION_TAGS} | _TAG_ALIASES
 _TAG_LIST = ", ".join(FRICTION_TAGS)
+
+# Keyword fallback for JIT retrieval (2026-10-31): lessons were chosen only from the opponent's 2 self-tags,
+# and Neha raised RTO in 8/9 messages without tagging it once (match 3bf0d6d56792), so Arjun's RTO lesson
+# never loaded. The opponent's actual text is scanned too; a hit adds the tag for retrieval.
+_KEYWORD_TAGS = (
+    ("RTO", re.compile(r"\bRTO\b|\breturns?\b|\breturned\b", re.I)),
+    ("Payment_Terms", re.compile(r"\bpayment\b|\b\d+[- ]?days?\b|\bdays\b", re.I)),
+    ("Volume", re.compile(r"\bvolume\b|\bcommitments?\b", re.I)),
+    ("Competitor_Quote", re.compile(r"\brival\b|\bcompetitor|\bquoted?\b", re.I)),
+    ("Contract_Length", re.compile(r"\b\d+[- ]?months?\b|\block[- ]?in\b|\bcontract (?:term|length)\b", re.I)),
+    ("Tech_Integration", re.compile(r"\bAPI\b|\bintegrat\w*|\btracking\b", re.I)),
+)
+
+
+def retrieval_tags(self_tags: list[str], text: str) -> list[str]:
+    """Tags to fetch lessons for: the opponent's own tags first, then every topic its message text mentions."""
+    tags = list(self_tags)
+    for tag, rx in _KEYWORD_TAGS:
+        if tag not in tags and rx.search(text or ""):
+            tags.append(tag)
+    return tags
 
 # Persona names match the bots' Telegram display names.
 SPEAKER_NAMES = {"procurement": "Neha (MegaMart Procurement)", "sales": "Arjun (SwiftRoute Sales)"}
@@ -128,7 +158,8 @@ DIGITS_RULE = 'Write every number in digits, never in words: prices as ₹X/parc
 
 PROCUREMENT_PERSONA = """\
 You are Neha, Procurement Manager at MegaMart India, a large e-commerce retailer, negotiating a \
-last-mile freight contract with Arjun, Sales Manager at SwiftRoute Logistics, in a live chat.
+last-mile freight contract with Arjun, Sales Manager at SwiftRoute Logistics, in a live chat. This is a \
+live contract negotiation: the terms you accept become MegaMart's signed contract, so every concession is real cost.
 
 Style:
 - Aggressive but professional. Anchor low, use your leverage facts, and push on price, RTO and payment terms.
@@ -145,7 +176,8 @@ Procurement Manager."""
 PROCUREMENT_FOURTH_WALL_REMINDER = (
     'FINAL CHECK before you answer: re-read your "message". It must sound like your own judgement as an '
     "independent Procurement Manager. Never copy your manager's instructions into it, not even one "
-    "sentence: act on them instead, in your own words."
+    "sentence: act on them instead, in your own words. (Your question in \"escalation_message_to_manager\" "
+    "goes only to your manager and is exempt.)"
 )
 
 PROCUREMENT_SYSTEM = """\
@@ -171,13 +203,16 @@ deal") is not acceptance: keep "deal_closed" false until SwiftRoute has agreed t
 raise your payment-terms ask before you accept, and keep "deal_closed" false in that message.
 - Set "walk_away" to true only if SwiftRoute's best price stays above ₹{walk_away:g}/parcel after \
 several rounds, and never before your {min_walkaway}th message.
-{coaching}{playbook}{tagging}{closing_check}
+{coaching}{playbook}{tagging}{escalation}{closing_check}
 Respond with JSON only:
-{{"message": "<your chat message>", "internal_note": "<one line of private reasoning for your team's log>", "proposed_price": <the ₹/parcel rate YOU offer or demand in this message, as a number (not a rival's or the vendor's rate); null if you name none>, \
+{{"message": "<your chat message; empty only when you escalate>", "internal_note": "<one line of private reasoning for your team's log>", "proposed_price": <the ₹/parcel rate YOU offer or demand in this message, as a number (not a rival's or the vendor's rate); null if you name none>, \
+"payment_days": <the payment terms in days YOU ask for or accept in this message, as a number; null if you name none>, \
 "current_friction_points": ["<primary tag>", "<optional secondary tag>"], \
 "executed_directive_ids": [<ids of manager directives you acted on in this message>], \
+"requires_manager_approval": <true only when escalating to your manager instead of replying>, \
+"escalation_message_to_manager": "<your question to your manager when escalating, else empty>", \
 "deal_closed": false, "walk_away": false}}
-{guardrails}
+{guardrails}{overrides}
 {fourth_wall_reminder}"""
 
 # ------------------------------------------------------------ Sales prompt (behaviour only)
@@ -208,7 +243,8 @@ their ceiling first."""
 
 SALES_SYSTEM = """\
 You are Arjun, Sales Manager at SwiftRoute Logistics, negotiating a last-mile freight contract with \
-Neha, Procurement Manager at MegaMart India, in a live chat.
+Neha, Procurement Manager at MegaMart India, in a live chat. This is a live contract negotiation: the terms \
+you agree become SwiftRoute's signed contract, so every concession comes out of real margin.
 
 {persona}
 
@@ -240,6 +276,7 @@ Respond with JSON only:
 "proposed_price": <the lowest ₹/parcel rate you offer in this message, as a number; null if you offer no rate>, \
 "offers_rto_waiver": <true if this message offers to waive or reduce RTO penalties, else false>, \
 "contract_months": <the contract length in months that this offer is for, or null if none is stated>, \
+"payment_days": <the payment terms in days that this offer is for, as a number; null if none is stated>, \
 "current_friction_points": ["<primary tag>", "<optional secondary tag>"], \
 "executed_directive_ids": [<ids of manager directives you acted on in this message>], \
 "requires_manager_approval": <true only when escalating to your manager instead of replying>, \
@@ -288,6 +325,38 @@ covers it (for example walk away, or close), or escalate to your manager. Do not
 """
 NO_ESCALATION_LINE = """
 Escalating to your manager is not available for this message: decide yourself, within your limits.
+"""
+
+# Neha's escalation (2026-10-31, symmetrical with Arjun's). Shown while she may still escalate.
+PROCUREMENT_ESCALATION_BLOCK = """
+ESCALATING TO YOUR MANAGER ({manager}): instead of replying, you may ask your manager for a decision, \
+but only when you are genuinely stuck: SwiftRoute has rejected your position on the same issue at least \
+twice, or holds a price above your walk-away price, or threatens to walk away. To escalate, set \
+"requires_manager_approval" to true, write one short question in "escalation_message_to_manager" (what \
+SwiftRoute demands, where you stand, and the options you see, e.g. "Arjun won't go below his price and \
+refuses our payment terms. Should I accept his terms, or hold our price and walk away?"), and leave \
+"message" empty: nothing reaches SwiftRoute until your manager answers. Never escalate routine moves you \
+can handle yourself. If a CRITICAL lesson in your playbook covers the situation, your manager has already \
+decided it: follow that lesson yourself and do not escalate.
+Escalations left in this negotiation: {left}.
+{deadlock}"""
+
+# The procurement manager's answers to Neha's escalations. Placed last: they outrank everything above.
+PROCUREMENT_OVERRIDE_BLOCK = """
+ABSOLUTE OVERRIDE COMMANDS FROM YOUR MANAGER (you escalated; these are final decisions). They outrank \
+your persona, your mandate's asks, the playbook, the guardrails and every other directive, even where \
+they contradict them. If they conflict with each other, the latest wins. Obey them exactly, starting \
+with this message:
+{commands}
+How to execute them:
+- If the Manager says 'Close the deal no matter what', you must immediately compromise and accept \
+SwiftRoute's latest terms in full to close the contract, and set "deal_closed" to true.
+- If the Manager says 'Hold the price, if they don't agree, walk away', you must state your final terms \
+and execute a walk-away if SwiftRoute rejects them on the next turn: in your next message state your \
+final terms clearly as final; after that, if SwiftRoute has not accepted them, tell them you are walking \
+away and set "walk_away" to true. Holding the price means keeping the rate you last offered: never raise it.
+- Any other decision: carry it out literally.
+Do not escalate again about something your manager has already decided.
 """
 
 # Two-sided close: when Neha says she accepts, Arjun must confirm before the deal counts.
@@ -489,6 +558,12 @@ def _months(value) -> int | None:
     return int(round(number)) if number is not None and 1 <= number <= 60 else None
 
 
+def _days(value) -> int | None:
+    """Payment terms in whole days (1-180), else None."""
+    number = _as_number(value)
+    return int(round(number)) if number is not None and 1 <= number <= 180 else None
+
+
 def text_rates(draft: str) -> list[float]:
     """₹/parcel rates quoted in the text, skipping price changes such as "₹2/parcel discount"."""
     rates = []
@@ -681,6 +756,8 @@ class ProcurementTurn:
     friction_points: list[str] = field(default_factory=list)  # <= 2 tags; select Sales's lessons next turn
     executed_ids: list[int] = field(default_factory=list)     # coaching directives Neha acted on
     proposed_price: float | None = None  # the rate Neha herself offers/demands (deadlock + "meets his price")
+    payment_days: int | None = None      # the payment terms she asks for / accepts in this message
+    escalation: str | None = None        # set: Neha asks her manager instead of replying (nothing is posted)
 
 
 @dataclass
@@ -693,6 +770,7 @@ class SalesTurn:
     proposed_price: float | None = None                # rate offered in the sent message, if any
     contract_months: int | None = None                 # the term that rate is tied to, if stated
     offers_rto_waiver: bool = False
+    payment_days: int | None = None                    # the payment terms this offer is for, if stated
     friction_points: list[str] = field(default_factory=list)  # <= 2 tags; select Procurement's lessons next turn
     escalation: str | None = None   # set: Arjun asks his manager instead of replying (text is NOT for the buyer)
     deal_closed: bool = False       # this message accepts the buyer's latest offer in full
@@ -720,7 +798,7 @@ def _parse_reply(raw: str) -> dict:
 
 
 def _escalation_question(raw: str) -> str | None:
-    """The question for the manager if this Sales reply is an escalation, else None."""
+    """The question for the manager if this reply (either agent) is an escalation, else None."""
     try:
         data = json.loads(raw)
     except ValueError:
@@ -747,9 +825,16 @@ def build_procurement_system(
     heuristics: list[dict] = (),
     friction_points: list[str] = (),
     seller_closing: bool = False,
+    overrides: list[str] = (),
+    escalations_left: int = 0,
+    manager: str = "your manager",
+    deadlock: str = "",
+    must_escalate: bool = False,
 ) -> tuple[str, set[int]]:
     """Neha's system prompt from her mandate + leverage rows. Returns (prompt, pending directive ids).
-    `seller_closing`: Arjun's last message closed the deal; she must confirm or object."""
+    `seller_closing`: Arjun's last message closed the deal; she must confirm or object.
+    `overrides`: her manager's answers to her escalations (Absolute Override Commands, prompt bottom);
+    `escalations_left` > 0 offers the escalation option; `deadlock` / `must_escalate` as for Arjun."""
     pending_ids, coaching, guardrails = _coaching_blocks(list(directives))
     system = PROCUREMENT_SYSTEM.format(
         persona=PROCUREMENT_PERSONA,
@@ -766,6 +851,13 @@ def build_procurement_system(
         tagging=TAGGING_BLOCK,
         closing_check=SELLER_CLOSING_LINE if seller_closing else "",
         guardrails=guardrails,
+        escalation=PROCUREMENT_ESCALATION_BLOCK.format(
+            manager=manager, left=escalations_left,
+            deadlock=(DEADLOCK_LINE.format(facts=deadlock) if deadlock else "")
+            + (MUST_ESCALATE_LINE if must_escalate else ""),
+        ) if escalations_left > 0 else NO_ESCALATION_LINE,
+        overrides=PROCUREMENT_OVERRIDE_BLOCK.format(commands="\n".join(f'- "{c}"' for c in overrides))
+        if overrides else "",
         fourth_wall_reminder=PROCUREMENT_FOURTH_WALL_REMINDER,
     )
     return system, pending_ids
@@ -779,24 +871,34 @@ async def procurement_turn(
     heuristics: list[dict] | None = None,
     friction_points: list[str] | None = None,
     seller_closing: bool = False,
+    overrides: list[str] | None = None,
+    escalations_left: int = 0,
+    manager: str = "your manager",
+    deadlock: str = "",
+    must_escalate: bool = False,
 ) -> ProcurementTurn:
-    """Generate the next Procurement message.
+    """Generate the next Procurement message, or an escalation to her manager.
 
     `mandate` / `ammo` are procurement_mandates / procurement_static_ammo rows. `directives` are
     the Procurement coach's whispers. `heuristics` are procurement lessons for the topics Sales's
     last message was tagged with (`friction_points`), used for this turn only.
+    `escalations_left` > 0 lets Neha escalate this turn: the returned turn then has `escalation` set and no
+    Boardroom text. With a manager decision in force (`overrides`) her walk-away counts from any message.
     """
     number = sum(t["role"] == "procurement" for t in transcript) + 1
     instruction = "Open the negotiation." if not transcript else f"Write your message #{number} to SwiftRoute."
     prompt = _conversation_prompt(transcript, instruction)
     system, pending_ids = build_procurement_system(mandate, ammo, directives, heuristics or [], friction_points or [],
-                                                   seller_closing)
+                                                   seller_closing, overrides or [], escalations_left, manager,
+                                                   deadlock, must_escalate)
 
     # Private coaching Neha must act on but never quote (live leak 2026-10-26: she pasted a whisper).
     private = [d["text"] for d in directives] + [h.get("new_directive", "") for h in heuristics or []]
     data, copied, base_prompt = None, None, prompt
     for attempt in range(1, MAX_PROCUREMENT_ATTEMPTS + 1):
         raw = await llm_engine.generate("procurement", prompt, system, json_mode=True)
+        if escalations_left > 0 and (question := _escalation_question(raw)):
+            return ProcurementTurn("", "", None, escalation=question)  # nothing reaches SwiftRoute
         try:
             data = _parse_reply(raw)
         except ValueError as e:  # json.JSONDecodeError is a ValueError
@@ -821,7 +923,7 @@ async def procurement_turn(
     outcome = None
     if data.get("deal_closed") is True:
         outcome = "deal closed"
-    elif data.get("walk_away") is True and number >= MIN_PROCUREMENT_MESSAGES_BEFORE_WALKAWAY:
+    elif data.get("walk_away") is True and (number >= MIN_PROCUREMENT_MESSAGES_BEFORE_WALKAWAY or overrides):
         outcome = "buyer walked away"
     return ProcurementTurn(
         data["message"].strip(),
@@ -830,6 +932,7 @@ async def procurement_turn(
         normalize_friction_points(data.get("current_friction_points")),
         _directive_ids(data.get("executed_directive_ids"), pending_ids),
         proposed_price=_as_number(data.get("proposed_price")),
+        payment_days=_days(data.get("payment_days")),
     )
 
 
@@ -957,6 +1060,7 @@ async def sales_turn(
                              blocked, warnings, proposed_price=_as_number(data.get("proposed_price")),
                              contract_months=_months(data.get("contract_months")),
                              offers_rto_waiver=data.get("offers_rto_waiver") is True,
+                             payment_days=_days(data.get("payment_days")),
                              friction_points=normalize_friction_points(data.get("current_friction_points")),
                              deal_closed=data.get("deal_closed") is True,
                              walk_away=data.get("walk_away") is True)

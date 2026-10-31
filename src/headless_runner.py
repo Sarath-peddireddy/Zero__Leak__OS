@@ -48,12 +48,15 @@ LEAK_RE = re.compile(r"playbook|lessons?\b|directive|guardrail|override|coach|my
 def parse_args(argv):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--matches", type=int, default=5, help="matches per arm (default 5)")
-    ap.add_argument("--arms", default="before,after", help="comma list of: before, after")
+    ap.add_argument("--arms", default="before,after", help="comma list of: before, after, or names from --arm-db")
+    ap.add_argument("--arm-db", action="append", default=[], metavar="NAME=PATH",
+                    help="extra arm played on a copy of PATH as is (e.g. a playbook rebuilt by the Judge alone)")
     ap.add_argument("--manager", choices=("hold", "close"), default="hold", help="answer to every escalation")
     ap.add_argument("--neha-note", default=DEFAULT_NOTE, help='coaching note for Neha ("" for none)')
     ap.add_argument("--model", default=os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite"))
     ap.add_argument("--delay", type=float, default=1.0, help="seconds between messages (default 1)")
     ap.add_argument("--out", default=str(ROOT / "bench_runs"))
+    ap.add_argument("--run-dir", help="exact output folder (default: --out/<timestamp>); used by shadow_test.py")
     ap.add_argument("--resume", metavar="RUN_DIR",
                     help="continue a cut-short run in RUN_DIR (same arms, note and manager; finished matches kept)")
     return ap.parse_args(argv)
@@ -135,11 +138,11 @@ def keep_awake(on: bool) -> None:
     ctypes.windll.kernel32.SetThreadExecutionState(es_continuous | (es_system_required if on else 0))
 
 
-def prepare_db(run_dir: Path, arm: str, reuse: bool = False) -> Path:
+def prepare_db(run_dir: Path, arm: str, reuse: bool = False, source: Path | None = None) -> Path:
     path = run_dir / f"db_{arm}.db"
     if reuse and path.exists():  # --resume: keep the copy the finished matches were played on
         return path
-    shutil.copy(ROOT / "data" / "zeroleak.db", path)
+    shutil.copy(source or ROOT / "data" / "zeroleak.db", path)
     if arm == "before":
         with sqlite3.connect(path) as c:
             c.execute("DELETE FROM sales_heuristics")
@@ -150,7 +153,7 @@ def _priced(offers):
     return [p for p in offers if p is not None]
 
 
-def score(arm, idx, match, collector, seconds, sales_bot):
+def score(arm, idx, match, collector, seconds, sales_bot, tiers=None):
     sales_texts = [t["text"] for t in match["transcript"] if t["role"] == "sales"]
     proc_texts = [t["text"] for t in match["transcript"] if t["role"] == "procurement"]
     terms = match.get("_terms")
@@ -158,16 +161,18 @@ def score(arm, idx, match, collector, seconds, sales_bot):
     arjun, neha = _priced(match["sales_offers"]), _priced(match.get("procurement_offers", []))
     leaks = [t for t in sales_texts if LEAK_RE.search(t)]
     deal = match["end_code"] == "deal"
+    floor = reports._context(match, tiers)[1]["floor_price"] if tiers else None  # rate-card floor for her volume
     return {
         "arm": arm, "index": idx, "match_id": match["match_id"], "end_code": match["end_code"],
         "deal": deal, "seconds": round(seconds), "messages": len(match["transcript"]),
-        "rate": terms.rate if terms and deal else None,
+        "rate": terms.rate if terms and deal else None, "floor": floor,
         "payment_days": terms.payment_days if terms and deal else None,
         "contract_months": terms.contract_months if terms and deal else None,
         "rto_waiver": terms.rto_waiver if terms and deal else None,
         "arjun_first": arjun[0] if arjun else None, "arjun_lowest": min(arjun) if arjun else None,
         "arjun_last": arjun[-1] if arjun else None, "neha_last": neha[-1] if neha else None,
         "escalations": len(questions),
+        "neha_escalations": len(match.get("procurement_escalations", [])),
         "escalations_self": sum(not (q.startswith("We're deadlocked") or q.startswith("I'm ready to walk away"))
                                 for q in questions),
         "escalations_backstop": sum(q.startswith("We're deadlocked") for q in questions),
@@ -181,6 +186,10 @@ def score(arm, idx, match, collector, seconds, sales_bot):
         "number_words": sum(bool(N.number_words(t)) for t in sales_texts + proc_texts),
         "lessons_used": sorted(match["playbook_topics"]),
         "terms_error": match.get("_terms_error"),
+        # Per turn, for the memory audit: Neha's tags (they pick Arjun's lessons), what was loaded, his offers.
+        "turn_log": [line for line in collector.lines if line.startswith(("Sales tags:", "Procurement note:"))],
+        "sales_offers": match["sales_offers"], "sales_offer_months": match["sales_offer_months"],
+        "procurement_offers": match.get("procurement_offers", []),
         "transcript": match["transcript"],
         "escalation_questions": questions,
     }
@@ -209,7 +218,7 @@ async def play(arm, idx, decision, note, collector):
     manager.cancel()
     await asyncio.gather(*list(B.judge_tasks), return_exceptions=True)  # bench_debrief tasks
     B.active_matches.pop(group, None)
-    return score(arm, idx, match, collector, time.monotonic() - started, sales_bot)
+    return score(arm, idx, match, collector, time.monotonic() - started, sales_bot, await db_init.fetch_cpq_tiers())
 
 
 # ------------------------------------------------------------------ summary
@@ -233,11 +242,14 @@ def summarise(rows):
             "neha_walkaways": sum(r["end_code"] == "walkaway" for r in rs),
             "capped_or_errors": sum(r["end_code"] in ("cap", "error") for r in rs),
             "avg_deal_rate": _avg(r["rate"] for r in deals),
-            "avg_margin_over_floor": _avg((r["rate"] - 41) if r["rate"] is not None else None for r in deals),
+            # vs the rate-card floor of the tier (rows from before 2026-10-31 have no "floor": ₹41, tier 4)
+            "avg_margin_over_floor": _avg((r["rate"] - (r.get("floor") or 41)) if r["rate"] is not None else None
+                                          for r in deals),
             "avg_payment_days": _avg(r["payment_days"] for r in deals),
             "rto_given_in_deals": sum(r["rto_waiver"] == "included" for r in deals),
             "avg_lowest_offer": _avg(r["arjun_lowest"] for r in rs),
             "avg_escalations": _avg(r["escalations"] for r in rs),
+            "avg_neha_escalations": _avg(r.get("neha_escalations", 0) for r in rs),
             "avg_messages": _avg(r["messages"] for r in rs),
             "guard_blocks": sum(r["guard_blocks"] for r in rs),
             "walk_rewrites": sum(r["walk_rewrites"] for r in rs),
@@ -251,9 +263,10 @@ def print_table(summary):
     rows = [("Matches", "matches"), ("Deals", "deals"), ("Deal rate %", "deal_rate_pct"),
             ("Arjun walked away", "arjun_walkaways"), ("Neha walked away", "neha_walkaways"),
             ("Capped / errors", "capped_or_errors"), ("Avg deal ₹/parcel", "avg_deal_rate"),
-            ("Avg margin over ₹41", "avg_margin_over_floor"), ("Avg payment days", "avg_payment_days"),
+            ("Avg margin over floor", "avg_margin_over_floor"), ("Avg payment days", "avg_payment_days"),
             ("RTO waiver in deals", "rto_given_in_deals"), ("Avg lowest offer ₹", "avg_lowest_offer"),
-            ("Avg escalations", "avg_escalations"), ("Avg messages", "avg_messages"),
+            ("Avg escalations", "avg_escalations"), ("Avg Neha escalations", "avg_neha_escalations"),
+            ("Avg messages", "avg_messages"),
             ("Guard blocks", "guard_blocks"), ("Walk-away rewrites", "walk_rewrites"),
             ("Leak-word messages", "leaks"), ("Numbers in words", "number_words")]
     arms = list(summary)
@@ -285,11 +298,13 @@ async def main():
         arms = [a.strip() for a in ARGS.arms.split(",") if a.strip()]
         matches, neha_note = ARGS.matches, ARGS.neha_note
         decision = B.DECISION_HOLD if ARGS.manager == "hold" else B.DECISION_CLOSE
-        run_dir = Path(ARGS.out) / datetime.now().strftime("%Y%m%d_%H%M%S")
-    if not arms or any(a not in ("before", "after") for a in arms):
-        raise SystemExit("--arms must list before and/or after")
+        run_dir = Path(ARGS.run_dir) if ARGS.run_dir else Path(ARGS.out) / datetime.now().strftime("%Y%m%d_%H%M%S")
+    extra = dict(spec.split("=", 1) for spec in ARGS.arm_db)
+    if not arms or any(a not in ("before", "after") and a not in extra and not previous for a in arms):
+        raise SystemExit("--arms must list before, after or a name given with --arm-db NAME=PATH")
     run_dir.mkdir(parents=True, exist_ok=True)
-    dbs = {arm: prepare_db(run_dir, arm, reuse=bool(previous)) for arm in arms}
+    dbs = {arm: prepare_db(run_dir, arm, reuse=bool(previous), source=Path(extra[arm]) if arm in extra else None)
+           for arm in arms}
     for path in dbs.values():
         db_init.DB_PATH = path
         await db_init.init_db()
@@ -309,7 +324,11 @@ async def main():
                   "playbook_after": [{"topic_tag": t, "critical": bool(c), "directive": d}
                                      for t, c, d in sqlite3.connect(dbs["after"]).execute(
                                          "SELECT topic_tag, is_critical, new_directive FROM sales_heuristics")]
-                  if "after" in dbs else []}
+                  if "after" in dbs else [],
+                  "playbooks": {arm: [{"topic_tag": t, "critical": bool(c), "directive": d}
+                                      for t, c, d in sqlite3.connect(path).execute(
+                                          "SELECT topic_tag, is_critical, new_directive FROM sales_heuristics")]
+                                for arm, path in dbs.items()}}
     done = {(r["arm"], r["index"]) for r in rows}
     results = run_dir / "results.json"
     keep_awake(True)

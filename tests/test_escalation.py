@@ -11,6 +11,10 @@ from types import SimpleNamespace
 PROJECT = Path(__file__).resolve().parent.parent
 SCRATCH = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT / "src"))
+import os  # noqa: E402
+# .env may hold dev settings: a test never starts real shadow matches (Gemini), and pins self-play.
+os.environ.setdefault("ZEROLEAK_SHADOW_MATCHES", "0")
+os.environ.setdefault("ZEROLEAK_SELF_PLAY", "0")
 
 import db_init  # noqa: E402
 
@@ -239,6 +243,12 @@ async def main():
     check("Manager_Decision logged", any(r["speaker"] == "Manager_Decision" and r["payload_text"] == B.DECISION_HOLD
                                          for r in ledger))
     await asyncio.gather(*list(B.judge_tasks))
+    # 10-31: the merge drops "never offer below this … floor" (limit wording) -> it waits for the coach's OK
+    proposal = await db_init.fetch_pending(side="sales", topic_tag="Price")
+    check("deadlock lesson that drops limit wording -> proposal, not saved yet",
+          proposal is not None and "limit wording" in proposal["reason"]
+          and "₹43 as final" not in (await db_init.fetch_heuristic("sales", "Price"))["new_directive"], proposal)
+    await B.answer_lesson(proposal["pending_id"], True)  # the coach approves it
     price = await db_init.fetch_heuristic("sales", "Price")
     check("Judge stored the deadlock as a CRITICAL lesson", price["is_critical"] == 1 and "₹43 as final" in price["new_directive"])
     judge_prompts = [p for a, p, s in CALLS if a == "judge" and "ESCALATION to his manager" in p]
@@ -248,7 +258,7 @@ async def main():
     report = [t for c, t, _ in sales_bot.sent if c == COACH and "Deal report" in t]
     check("Sales report: outcome + escalation + critical lesson",
           report and "we walked away, on your decision" in report[0] and "🙋 Arjun asked" in report[0]
-          and "critical, from your decision" in report[0], report[:1])
+          and "waiting for your OK" in report[0] and "limit wording" in report[0], report[:1])
 
     # ======================================================== next match: critical lesson is fed back (JIT)
     reset()
@@ -309,6 +319,13 @@ async def main():
     check("button sends the preset 'close' decision", m["manager_overrides"] == [B.DECISION_CLOSE], m["manager_overrides"])
     check("Arjun accepts -> deal closed by Sales", m["end_code"] == "deal")
     await asyncio.gather(*list(B.judge_tasks))
+    price = await db_init.fetch_heuristic("sales", "Price")
+    # 10-30: the Price lesson is CRITICAL here, so the merge waits for the coach's OK
+    proposal = await db_init.fetch_pending(side="sales", topic_tag="Price")
+    check("merge into a CRITICAL lesson -> proposal, live lesson untouched",
+          proposal is not None and proposal["new_directive"] == "Merged directive"
+          and price["new_directive"] != "Merged directive", (proposal, price))
+    await B.answer_lesson(proposal["pending_id"], True)
     price = await db_init.fetch_heuristic("sales", "Price")
     check("merge keeps the lesson CRITICAL", price["is_critical"] == 1 and price["new_directive"] == "Merged directive")
 
@@ -748,7 +765,7 @@ async def main():
     check("Neha gets no learned lessons while parked", "PROC-LESSON" not in [s for a, p, s in CALLS if a == "procurement"][0])
     await asyncio.gather(*list(B.judge_tasks))
     neha_report = [t for c, t, _ in proc_bot.sent if "Negotiation report" in t]
-    check("Neha's report has no lessons section while parked", neha_report and "Lessons I keep" not in neha_report[0])
+    check("Neha's report has no lessons section while parked", neha_report and "Playbook changes proposed" not in neha_report[0])
 
     # no internal terms in chat text
     import re

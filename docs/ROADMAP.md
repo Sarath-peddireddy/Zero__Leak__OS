@@ -14,9 +14,18 @@ Neha's learning stays off, so any change in Arjun's play comes from Arjun's own 
 - [x] Verification runs (2026-10-25, real Gemini, DB copy): match 1 escalated → CRITICAL lesson; match 3 handled the same deadlock alone (no escalation, walked away using the lesson)
 - [ ] Repeat the verification in Telegram, and over more matches (deal rate, escalations per match should fall)
 - [ ] Decide: may a CRITICAL lesson authorise walking away alone, or should it only make Arjun hold and ask again?
-- [ ] Decide: should price-limit whispers and lessons ("never below ₹43") be enforced by the guard like `/floor`? (Today they are prompt-level only.)
+- [x] Decided 2026-10-31: price / payment-day / step-size lessons are NOT enforced by code checks; Arjun learns them through the playbook (only CPQ floor, `/floor` and the RTO-months rule are hard)
 
-## Phase B (parked): Adversarial Self-Play
+## LLM Prompt Polish (Low Priority)
+
+Arjun gaps parked on 2026-10-31 (coach decision: numeric limits are learned through the playbook, not hard-coded checks).
+Each one is caught by an existing guard or is cosmetic; none has cost a deal yet.
+
+- [ ] **Drafts "floor"**: Arjun keeps reaching for "our floor" / "hard floor" (blocked 3× in the 10-30 benchmark, 2× in the 10-30 live test). `INTERNAL_WORDS_ERROR` rewrites it every time, nothing is posted, but each block costs a Gemini call.
+- [ ] **Invents exceptions**: "I have gone straight to leadership and secured a one-time exception" (match bc8aed9bc422). Not a fact from the system of record.
+- [ ] **Rate format**: "44 rupees per parcel" instead of "₹44/parcel" (copies Neha's style, match 396808c63f6e). Digits are kept; the price guard reads the JSON price, so it is cosmetic.
+
+## Phase B (current from 2026-10-31): Adversarial Self-Play
 
 Goal: both agents learn, so each one's improvement pressures the other.
 
@@ -24,6 +33,8 @@ Goal: both agents learn, so each one's improvement pressures the other.
 - Procurement database: `procurement_mandates`, `procurement_static_ammo`, `procurement_heuristics` (UNIQUE topic_tag)
 - Procurement Judge: "Head of Global Sourcing at MegaMart" persona for `Procure_Whisper` rows, UPSERT into `procurement_heuristics` (separate reward model from the "VP of Sales at SwiftRoute" persona that audits Arjun)
 - Symmetrical tagging: both agents tag their own message (max 2); the tags select the opponent's lessons
+  - 2026-10-31: plus a keyword scan of the opponent's message text (`negotiation.retrieval_tags`), both sides, and Communication_Tone lessons on every turn
+- Judge safety (2026-10-30, both sides): screening, scope, proposals for risky changes with coach approval
 - Procurement War Room whispers (these stay live in Phase A, so the coach can steer the sparring partner)
 
 **Still to build:**

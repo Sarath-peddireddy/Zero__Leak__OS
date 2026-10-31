@@ -12,6 +12,10 @@ from types import SimpleNamespace
 PROJECT = Path(__file__).resolve().parent.parent
 SCRATCH = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT / "src"))
+import os  # noqa: E402
+# .env may hold dev settings: a test never starts real shadow matches (Gemini), and pins self-play.
+os.environ.setdefault("ZEROLEAK_SHADOW_MATCHES", "0")
+os.environ.setdefault("ZEROLEAK_SELF_PLAY", "1")
 
 import db_init  # noqa: E402
 
@@ -221,9 +225,16 @@ SCRIPT["judge"] = [
 ]
 CALLS.clear()
 outcomes = run(post_match.run_judge_agent(MID))
-check("judge outcomes", [(o.side, o.action, o.topic_tag) for o in outcomes] == [
-    ("sales", "merged", "RTO"), ("procurement", "inserted", "Competitor_Quote"),
-    ("procurement", "merged", "Competitor_Quote")], [(o.side, o.action, o.topic_tag) for o in outcomes])
+check("judge outcomes (10-31: every change is staged)", [(o.side, o.action, o.topic_tag) for o in outcomes] == [
+    ("sales", "proposed", "RTO"), ("procurement", "proposed", "Competitor_Quote"),
+    ("procurement", "proposed", "Competitor_Quote")], [(o.side, o.action, o.topic_tag) for o in outcomes])
+check("both procurement notes fold into ONE proposal", outcomes[1].heuristic_id == outcomes[2].heuristic_id)
+check("procurement playbook still empty before approval", run(db_init.fetch_heuristics("procurement", None)) == [])
+run(db_init.resolve_pending(outcomes[1].heuristic_id, approve=True))
+# 10-30: the RTO merge removes the old month count -> waits for the coach; approving it writes it in place
+check("RTO proposal leaves the live lesson as it was until approved",
+      run(db_init.fetch_heuristic("sales", "RTO"))["new_directive"] == rto_before["new_directive"])
+run(db_init.resolve_pending(outcomes[0].heuristic_id, approve=True))
 rto_after = run(db_init.fetch_heuristic("sales", "RTO"))
 check("sales RTO merged in place (same id, new text)",
       rto_after["heuristic_id"] == rto_before["heuristic_id"] and "24-month" in rto_after["new_directive"])
@@ -336,9 +347,9 @@ sales_report = [t for c, t in sales_bot.sent if c == COACH and "Deal report" in 
 check("both reports sent", len(proc_report) == 1 and len(sales_report) == 1)
 check("proc report uses mandate (walk-away ₹43, target ₹38)", proc_report and "Walk-away ₹43" in proc_report[0]
       and "Target ₹38" in proc_report[0])
-check("proc report lists Neha's lessons", proc_report and "Lessons I keep for next time" in proc_report[0])
+check("proc report lists Neha's lessons", proc_report and "Playbook changes proposed" in proc_report[0])
 check("sales report lists only sales lessons",
-      sales_report and "Payment terms" in sales_report[0] and "Competitor quotes" not in sales_report[0].split("Lessons saved")[1])
+      sales_report and "Payment terms" in sales_report[0] and "Competitor quotes" not in sales_report[0].split("Playbook changes proposed")[1])
 check("no internal terms in any chat", not any(re.search(r"SYSTEM_ERROR|match_id|heuristic|Procure_Whisper|CPQ", t)
                                                for b in (sales_bot, proc_bot) for _, t in b.sent))
 

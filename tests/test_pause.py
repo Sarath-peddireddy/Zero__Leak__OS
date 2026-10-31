@@ -12,6 +12,10 @@ from types import SimpleNamespace
 PROJECT = Path(__file__).resolve().parent.parent
 SCRATCH = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT / "src"))
+import os  # noqa: E402
+# .env may hold dev settings: a test never starts real shadow matches (Gemini), and pins self-play.
+os.environ.setdefault("ZEROLEAK_SHADOW_MATCHES", "0")
+os.environ.setdefault("ZEROLEAK_SELF_PLAY", "0")
 
 import db_init  # noqa: E402
 

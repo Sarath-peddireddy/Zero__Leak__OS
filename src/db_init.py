@@ -9,7 +9,9 @@ Every fact either agent may use lives here, not in prompt code:
   sales_static_ammo  (value facts)   procurement_static_ammo (leverage facts)
   sales_heuristics   (lessons)       procurement_heuristics  (lessons)
 
-Plus the shared ledger, match_transcripts.
+Plus the shared ledger, match_transcripts, and pending_lessons: the staging gate where every
+playbook change the Judge proposes waits for the human manager's ✅ before it reaches either
+heuristics table.
 
 "Highlander" rule: topic_tag is UNIQUE in both heuristics tables, so there is
 exactly one master lesson per topic. The Judge merges new lessons into it with
@@ -44,8 +46,9 @@ AMMO_TABLES = {"sales": "sales_static_ammo", "procurement": "procurement_static_
 #   Human_Whisper                 coaching sent to Sales;  Procure_Whisper: coaching sent to Procurement
 #   Sales_Escalation              Arjun asked his manager for a decision (two-way escalation)
 #   Manager_Decision              the manager's answer, obeyed as an Absolute Override Command
+#   Procure_Escalation / Procure_Decision   the same for Neha and her manager (2026-10-31)
 LEDGER_SPEAKERS = ("Sales_Agent", "Procure_Agent", "Human_Whisper", "Procure_Whisper",
-                   "Sales_Escalation", "Manager_Decision")
+                   "Sales_Escalation", "Manager_Decision", "Procure_Escalation", "Procure_Decision")
 
 TRANSCRIPTS_DDL = """
 CREATE TABLE IF NOT EXISTS {name} (
@@ -68,6 +71,37 @@ CREATE TABLE IF NOT EXISTS {name} (
     updated_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 """
+
+# The HITL Memory Staging Gate (2026-10-31): EVERY Judge change to a playbook (new topic, merge, CRITICAL
+# escalation lesson) is staged here. The live tables above are only written when the coach taps ✅ Approve.
+#   new_directive       the PROPOSED directive (the live rule keeps its own new_directive until approval)
+#   previous_directive  the live directive when proposed ('' = new topic); approval is refused if it changed (stale)
+#   reason              risk warnings for the coach ('' = none): changes a CRITICAL lesson, drops a number, much shorter
+#   status              pending -> approved | rejected | stale | superseded (a newer proposal on the topic replaced it)
+#   source_note         the coaching note(s) / manager decision the proposal came from
+#   shadow_json         the shadow regression result shown in the approval request (shadow_test.py)
+#   war_room_chat_id    where the approval request goes; sent_at = when it went (NULL = still to send)
+PENDING_DDL = """
+CREATE TABLE IF NOT EXISTS {name} (
+    pending_id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    side               TEXT NOT NULL CHECK (side IN ('sales', 'procurement')),
+    topic_tag          TEXT NOT NULL,
+    past_mistake       TEXT NOT NULL,
+    new_directive      TEXT NOT NULL,
+    is_critical        INTEGER NOT NULL DEFAULT 0 CHECK (is_critical IN (0, 1)),
+    previous_directive TEXT NOT NULL,
+    reason             TEXT NOT NULL,
+    status             TEXT NOT NULL DEFAULT 'pending'
+                       CHECK (status IN ('pending', 'approved', 'rejected', 'stale', 'superseded')),
+    created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    source_note        TEXT NOT NULL DEFAULT '',
+    shadow_json        TEXT,
+    war_room_chat_id   INTEGER,
+    sent_at            TEXT
+);
+"""
+PENDING_OLD_COLS = ("pending_id, side, topic_tag, past_mistake, new_directive, is_critical, previous_directive, "
+                    "reason, status, created_at")  # the 2026-10-30 table, copied over by the migration
 
 AMMO_DDL = """
 CREATE TABLE IF NOT EXISTS {name} (
@@ -109,6 +143,7 @@ CREATE INDEX IF NOT EXISTS idx_transcripts_match ON match_transcripts (match_id,
 """
     + "".join(AMMO_DDL.format(name=t) for t in AMMO_TABLES.values())
     + "".join(HEURISTICS_DDL.format(name=t) for t in HEURISTICS_TABLES.values())
+    + PENDING_DDL.format(name="pending_lessons")
 )
 
 # ------------------------------------------------------------ Seed data (dummy MVP)
@@ -214,6 +249,17 @@ def _migrate_sync() -> None:
             conn.execute("DROP TABLE playbook_heuristics")
             logger.info("Migrated: %d playbook rule(s) moved to sales_heuristics", moved)
 
+        # 4. pending_lessons from 2026-10-30 -> staging gate table (status 'superseded' needs a rebuild, + columns).
+        sql = _table_sql(conn, "pending_lessons")
+        if sql and "'superseded'" not in sql:
+            conn.execute(PENDING_DDL.format(name="pending_lessons_new"))
+            conn.execute(f"INSERT INTO pending_lessons_new ({PENDING_OLD_COLS}) "
+                         f"SELECT {PENDING_OLD_COLS} FROM pending_lessons")
+            conn.execute("UPDATE pending_lessons_new SET sent_at = created_at")  # already announced, never resend
+            conn.execute("DROP TABLE pending_lessons")
+            conn.execute("ALTER TABLE pending_lessons_new RENAME TO pending_lessons")
+            logger.info("Migrated: pending_lessons is now the staging gate table")
+
         conn.execute("COMMIT")
     except BaseException:
         if conn.in_transaction:
@@ -288,6 +334,90 @@ def _upsert_heuristic_sync(side: str, topic_tag: str, past_mistake: str, new_dir
         return row[0]
 
 
+PENDING_COLS = ("pending_id, side, topic_tag, past_mistake, new_directive, is_critical, previous_directive, "
+                "reason, status, created_at, source_note, shadow_json, war_room_chat_id, sent_at")
+
+
+def _save_pending_sync(side: str, topic_tag: str, past_mistake: str, new_directive: str, critical: bool,
+                       previous: str, reason: str, pending_id: int | None, note: str, supersede: int | None) -> int:
+    with _connect() as conn:
+        if pending_id is not None:  # same Judge run, request not sent yet: update the proposal in place
+            conn.execute("UPDATE pending_lessons SET past_mistake = ?, new_directive = ?, "
+                         "is_critical = MAX(is_critical, ?), reason = ?, "
+                         "source_note = CASE WHEN source_note = '' THEN ? ELSE source_note || char(10) || ? END "
+                         "WHERE pending_id = ?",
+                         (past_mistake, new_directive, int(critical), reason, note, note, pending_id))
+            return pending_id
+        if supersede is not None:  # the coach already saw that one: its buttons must not apply the new text
+            conn.execute("UPDATE pending_lessons SET status = 'superseded' WHERE pending_id = ? AND status = 'pending'",
+                         (supersede,))
+        return conn.execute(
+            "INSERT INTO pending_lessons (side, topic_tag, past_mistake, new_directive, is_critical, "
+            "previous_directive, reason, source_note) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING pending_id",
+            (side, topic_tag, past_mistake, new_directive, int(critical), previous, reason, note)).fetchone()[0]
+
+
+def _update_pending_sync(pending_id: int, fields: dict) -> None:
+    allowed = {"shadow_json", "war_room_chat_id", "sent_at"}
+    if not fields or set(fields) - allowed:
+        raise ValueError(f"update_pending: only {sorted(allowed)} may change, got {sorted(fields)}")
+    sets = ", ".join(f"{k} = ?" for k in fields)  # keys checked against `allowed` above
+    with _connect() as conn:
+        conn.execute(f"UPDATE pending_lessons SET {sets} WHERE pending_id = ?", (*fields.values(), pending_id))
+
+
+def _fetch_unsent_pending_sync() -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute(f"SELECT {PENDING_COLS} FROM pending_lessons WHERE status = 'pending' "
+                            "AND sent_at IS NULL ORDER BY pending_id")
+        return [dict(r) for r in rows]
+
+
+def _snapshot_sync(dest: Path) -> None:
+    """A consistent copy of the live DB (SQLite backup API: safe while the bot is writing)."""
+    src, dst = sqlite3.connect(DB_PATH), sqlite3.connect(dest)
+    try:
+        src.backup(dst)
+    finally:
+        dst.close()
+        src.close()
+
+
+def _fetch_pending_sync(pending_id: int | None, side: str | None, topic_tag: str | None) -> dict | None:
+    with _connect() as conn:
+        if pending_id is not None:
+            row = conn.execute(f"SELECT {PENDING_COLS} FROM pending_lessons WHERE pending_id = ?",
+                               (pending_id,)).fetchone()
+        else:
+            row = conn.execute(f"SELECT {PENDING_COLS} FROM pending_lessons WHERE side = ? AND topic_tag = ? "
+                               "AND status = 'pending' ORDER BY pending_id DESC LIMIT 1", (side, topic_tag)).fetchone()
+        return dict(row) if row else None
+
+
+def _resolve_pending_sync(pending_id: int, approve: bool) -> tuple[str, dict | None]:
+    """One transaction: approve (write the lesson if the live rule is unchanged) or reject."""
+    with _connect() as conn:
+        row = conn.execute(f"SELECT {PENDING_COLS} FROM pending_lessons WHERE pending_id = ?",
+                           (pending_id,)).fetchone()
+        if row is None:
+            return "missing", None
+        row = dict(row)
+        if row["status"] != "pending":
+            return row["status"], row
+        if not approve:
+            conn.execute("UPDATE pending_lessons SET status = 'rejected' WHERE pending_id = ?", (pending_id,))
+            return "rejected", row
+        table = HEURISTICS_TABLES[row["side"]]
+        live = conn.execute(f"SELECT new_directive FROM {table} WHERE topic_tag = ?", (row["topic_tag"],)).fetchone()
+        if (live[0] if live else "") != row["previous_directive"]:
+            conn.execute("UPDATE pending_lessons SET status = 'stale' WHERE pending_id = ?", (pending_id,))
+            return "stale", row
+        conn.execute("UPDATE pending_lessons SET status = 'approved' WHERE pending_id = ?", (pending_id,))
+    _upsert_heuristic_sync(row["side"], row["topic_tag"], row["past_mistake"], row["new_directive"],
+                           bool(row["is_critical"]))
+    return "approved", row
+
+
 def _log_message_sync(match_id: str, speaker: str, payload_text: str) -> None:
     with _connect() as conn:
         conn.execute(
@@ -350,6 +480,45 @@ async def upsert_heuristic(side: str, topic_tag: str, past_mistake: str, new_dir
     `critical` marks a lesson learned from a deadlock the manager had to break; it never resets.
     """
     return await asyncio.to_thread(_upsert_heuristic_sync, side, topic_tag, past_mistake, new_directive, critical)
+
+
+async def save_pending(side: str, topic_tag: str, past_mistake: str, new_directive: str, critical: bool,
+                       previous: str, reason: str, pending_id: int | None = None, note: str = "",
+                       supersede: int | None = None) -> int:
+    """Stage a playbook change for the coach's OK; returns its id.
+
+    `pending_id`: update that (not yet announced) proposal in place. `supersede`: mark that open proposal
+    'superseded' and insert a new one (the coach was already asked about the old text).
+    """
+    return await asyncio.to_thread(_save_pending_sync, side, topic_tag, past_mistake, new_directive, critical,
+                                   previous, reason, pending_id, note, supersede)
+
+
+async def update_pending(pending_id: int, **fields) -> None:
+    """Set shadow_json / war_room_chat_id / sent_at on a proposal."""
+    await asyncio.to_thread(_update_pending_sync, pending_id, fields)
+
+
+async def fetch_unsent_pending() -> list[dict]:
+    """Open proposals whose approval request was never sent (e.g. the bot stopped during the shadow test)."""
+    return await asyncio.to_thread(_fetch_unsent_pending_sync)
+
+
+async def snapshot_db(dest: Path) -> None:
+    """Copy the live database to `dest` consistently, even while matches are writing to it."""
+    await asyncio.to_thread(_snapshot_sync, Path(dest))
+
+
+async def fetch_pending(pending_id: int | None = None, side: str | None = None,
+                        topic_tag: str | None = None) -> dict | None:
+    """One proposal by id, or the open (status 'pending') proposal for a side + topic."""
+    return await asyncio.to_thread(_fetch_pending_sync, pending_id, side, topic_tag)
+
+
+async def resolve_pending(pending_id: int, approve: bool) -> tuple[str, dict | None]:
+    """Coach's answer. Returns (status, row): 'approved' (lesson written), 'rejected', 'stale' (the live lesson
+    changed since the proposal, nothing written), an earlier status if already answered, or 'missing'."""
+    return await asyncio.to_thread(_resolve_pending_sync, pending_id, approve)
 
 
 async def log_message(match_id: str, speaker: str, payload_text: str) -> None:

@@ -20,13 +20,16 @@ from html import escape
 
 import llm_engine
 from negotiation import SELF_PLAY, STANDING, applicable_tier, buyer_volume, fmt_rate, text_rates, volume_label
+from post_match import OPEN_PROPOSAL, SKIP_REASONS as SKIP_WHY
+import shadow_test
 
 logger = logging.getLogger("zeroleak.reports")
 
 TOPIC_LABELS = {
     "Price": "Price", "RTO": "RTO waiver", "Payment_Terms": "Payment terms",
     "Contract_Length": "Contract length", "Volume": "Volume", "SLA": "Service levels",
-    "Competitor_Quote": "Competitor quotes",
+    "Competitor_Quote": "Competitor quotes", "Tech_Integration": "Tech / integration",
+    "Communication_Tone": "Communication tone",
 }
 
 # end_code -> (Sales headline, Procurement headline)
@@ -169,30 +172,36 @@ def _coaching_lines(directives: list[dict]) -> list[str]:
 
 
 def _lesson_lines(outcomes: list | None, side: str) -> list[str]:
-    """"Lessons saved for next time" for one side's playbook."""
+    """"Playbook changes proposed" for one side: every change waits for the coach's approval (staging gate)."""
     if outcomes is None:
-        return ["• Could not be saved this time (the AI service was unavailable)."]
+        return ["• Could not be reviewed this time (the AI service was unavailable)."]
     mine = [o for o in outcomes if o.side == side]
     if not mine:
         return ["• None: no guidance was sent during this negotiation."]
-    # One entry per topic (one master lesson per topic): the lesson as it was before this negotiation,
-    # and as it is now, so the coach can see what the guidance changed.
+    # One entry per topic (one master lesson per topic): the live lesson and the proposed replacement.
     lines, by_topic = [], {}
     for o in mine:
         if o.action == "skipped":
-            lines.append(f"• Not saved: “{escape(o.whisper[:80])}”")
+            why = SKIP_WHY.get(o.reason)
+            lines.append(f"• Not saved: “{escape(o.whisper[:80])}”" + (f" ({why})" if why else ""))
+        elif o.action == "unchanged":
+            covered = "the change already waiting for your OK" if o.reason == OPEN_PROPOSAL else "the current lesson"
+            lines.append(f"• No change: “{escape(o.whisper[:80])}” is already covered by {covered}")
         else:
             by_topic.setdefault(o.topic_tag, []).append(o)
     for topic, outs in by_topic.items():
-        first, last = outs[0], outs[-1]
-        tag = "updated" if first.action == "merged" else "new"
-        if any(getattr(o, "kind", "whisper") == "escalation" for o in outs):
-            tag = f"critical, from your decision; {tag}"
+        last = outs[-1]  # later notes on a topic fold into the same proposal
+        tag = "critical, from your decision; " if any(getattr(o, "kind", "whisper") == "escalation" for o in outs) else ""
         notes = f", from {len(outs)} notes" if len(outs) > 1 else ""
-        lines.append(f"• <b>{TOPIC_LABELS.get(topic, topic)}</b> ({tag}{notes})")
-        if first.action == "merged" and getattr(first, "previous", ""):
-            lines.append(f"   <i>Before:</i> {escape(first.previous)}")
-        lines.append(f"   <i>Now:</i> {escape(last.directive)}")
+        lines.append(f"• <b>{TOPIC_LABELS.get(topic, topic)}</b> ({tag}waiting for your OK{notes})")
+        lines.append(f"   <i>Current:</i> {escape(last.previous) if last.previous else 'none (first lesson on this topic)'}")
+        lines.append(f"   <i>Proposed:</i> {escape(last.directive)}")
+        if last.reason:
+            lines.append(f"   ⚠️ {escape(last.reason)}")
+    if by_topic:
+        follow = ("A shadow test is running now; the approval request follows with its results."
+                  if shadow_test.SHADOW_MATCHES > 0 else "The approval request follows.")
+        lines.append(f"<i>Live lessons stay as they are until you approve. {follow}</i>")
     return lines
 
 
@@ -256,13 +265,17 @@ def procurement_report(match: dict, terms: DealTerms, tiers: list[dict], judge_o
     if terms.next_step:
         lines += ["", f"<b>Next step:</b> {escape(terms.next_step)}"]
     directives = match.get("procurement_coaching_directives", [])
-    if directives:
-        lines += ["", "<b>Your guidance</b>", *_coaching_lines(directives)]
+    asked = match.get("procurement_escalations", [])  # Neha's questions to the Head of Procurement
+    if directives or asked:
+        lines += ["", "<b>Your guidance</b>", *(_coaching_lines(directives) if directives else [])]
+    for e in asked:
+        answer = f"you decided “{escape(e['decision'])}”" if e["decision"] else "no decision in time"
+        lines.append(f"• 🙋 I asked you: “{escape(e['question'])}”: {answer}")
     if SELF_PLAY and (directives or judge_outcomes):  # Neha's learning is parked until Phase B
-        lines += ["", "<b>Lessons I keep for next time</b>", *_lesson_lines(judge_outcomes, "procurement")]
+        lines += ["", "<b>Playbook changes proposed</b>", *_lesson_lines(judge_outcomes, "procurement")]
     elif directives:
         lines += ["", "<b>Learning</b>", "• I used your guidance in this negotiation only. My learning is "
-                  "switched off for now, so I stay a fixed sparring partner while Arjun's progress is measured."]
+                  "switched off for now, so I keep a fixed strategy while SwiftRoute's agent is measured."]
     lines += ["", "— Neha, Procurement Manager"]
     return "\n".join(lines)
 
@@ -312,7 +325,7 @@ def sales_report(match: dict, terms: DealTerms, tiers: list[dict], judge_outcome
                       f"left on the table ({inr(gap * volume)}/month · {inr(gap * volume * months)} over the contract)"]
 
     lines += ["", "<b>Coaching</b>", *_coaching_lines(match["active_coaching_directives"])]
-    for e in match.get("escalations", []):
+    for e in match.get("escalations", []):  # Arjun's questions to the Head of Sales
         answer = f"you decided “{escape(e['decision'])}”" if e["decision"] else "no decision in time"
         lines.append(f"• 🙋 Arjun asked: “{escape(e['question'])}”: {answer}")
     if match.get("coach_floor") is not None:
@@ -323,7 +336,7 @@ def sales_report(match: dict, terms: DealTerms, tiers: list[dict], judge_outcome
         used = ", ".join(TOPIC_LABELS.get(t, t) for t in sorted(match["playbook_topics"]))
         lines.append(f"• Lessons from past negotiations in play: {used}")
 
-    lines += ["", "<b>Lessons saved for next time</b>", *_lesson_lines(judge_outcomes, "sales")]
+    lines += ["", "<b>Playbook changes proposed</b>", *_lesson_lines(judge_outcomes, "sales")]
 
     if terms.sales_summary:
         lines += ["", "<b>Summary</b>", escape(terms.sales_summary)]

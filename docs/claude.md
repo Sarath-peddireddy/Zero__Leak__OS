@@ -2,7 +2,7 @@
 
 **Project Name:** ZeroLeak OS
 **Domain:** B2B Enterprise Logistics (Freight Pricing, Volumetric Slabs, RTO Penalties)
-**Vision:** An autonomous, multi-agent negotiation simulator running on Telegram. It trains Sales AEs (SwiftRoute Logistics) to defend margins against an aggressive Procurement Agent (MegaMart India). The system utilizes a "Human-in-the-Loop" live whisper architecture, strict SQLite CPQ guardrails, and an autonomous RLHF (Reinforcement Learning from Human Feedback) memory compaction loop.
+**Vision:** An Autonomous Multi-Agent Deal Desk for live enterprise contract negotiation, running on Telegram. A Sales Agent (Arjun, SwiftRoute Logistics) defends margin against a Procurement Agent (Neha, MegaMart India), and both negotiate real contracts: the terms they agree are the terms that get signed. The system utilizes a "Human-in-the-Loop" live whisper architecture, strict SQLite CPQ guardrails, and an RLHF (Reinforcement Learning from Human Feedback) memory loop in which no learned rule goes live without a shadow regression test and the human manager's approval.
 
 ## 2. Tech Stack & Dependencies
 
@@ -16,9 +16,9 @@
 
 The system operates across three linked Telegram chats. The orchestrator must strictly route payloads to prevent cross-contamination.
 
-* **Chat 1: The Boardroom (Public Group):** The live negotiation arena. The Sales Agent and Procurement Agent chat here autonomously. The Human NEVER messages here directly.
-* **Chat 2: Sales War Room (Private DM):** The Human Sales Coach monitors the Boardroom here and sends live "Whisper" instructions to the Sales Agent.
-* **Chat 3: Procurement War Room (Private DM):** Reserved for monitoring Procurement agent logs and internal state.
+* **Chat 1: The Boardroom (Public Group):** The live negotiation channel. The Sales Agent and Procurement Agent negotiate here autonomously. The Human NEVER messages here directly.
+* **Chat 2: Sales War Room (Private DM):** The Human Sales Manager monitors the Boardroom here, sends live "Whisper" instructions to the Sales Agent, answers its escalations, and approves or rejects playbook updates.
+* **Chat 3: Procurement War Room (Private DM):** The same for the Procurement side (whispers, reports, playbook approvals).
 
 ## 4. Prompt Architecture: Live Context-Aware Whispers
 
@@ -63,11 +63,13 @@ The agents must not hallucinate pricing or memory.
 A third LLM, the **Judge Agent**, runs asynchronously post-match.
 
 1. **Synthesis:** The Judge Agent scans `match_transcripts` for every instance where a `Human_Whisper` occurred. It analyzes the 3 preceding messages to deduce the agent's failure, and generates a structured JSON heuristic (Trigger ➡️ Past Mistake ➡️ New Directive).
-2. **Memory Compaction (Deduplication):** Before inserting the new heuristic into `playbook_heuristics`, the Judge Agent queries existing rules with the same `topic_tag`. If semantic similarity exceeds 80%, the Judge Agent MERGES the new nuance into the existing rule rather than creating a duplicate. This ensures O(1) retrieval speed and strictly caps context bloat.
-3. **Just-In-Time (JIT) Retrieval:** In future matches, the orchestrator detects the topic of the Procurement Agent's latest message, queries `playbook_heuristics` by `topic_tag`, and silently injects the exact relevant heuristic into the Sales Agent's prompt for that turn only.
+2. **Memory Compaction (Deduplication):** The Judge Agent queries the existing master rule with the same `topic_tag` and MERGES the new nuance into it rather than creating a duplicate (one rule per topic, the newest coaching wins on conflicts). This ensures O(1) retrieval speed and strictly caps context bloat.
+3. **HITL Memory Staging Gate:** Memory regression (a good rule overwritten by a worse one) is a direct financial risk on a live deal desk. The Judge NEVER writes a live playbook: every new rule, merge or compaction is written to the `pending_lessons` staging table, and the agents keep using the live `new_directive` until the Human Manager taps ✅ Approve in Telegram. Only then does the staged rule overwrite the live one.
+4. **Shadow Regression:** Before the manager is asked, the backend plays a headless micro-benchmark (`shadow_test.py` → `headless_runner.py`, AI vs AI, on database copies): 5 matches with the current playbook and 5 with the proposed rule. The approval request carries the measured delta (avg closing margin, deal rate, payment days).
+5. **Just-In-Time (JIT) Retrieval:** In future matches, the orchestrator detects the topic of the Procurement Agent's latest message, queries `playbook_heuristics` by `topic_tag`, and silently injects the exact relevant heuristic into the Sales Agent's prompt for that turn only.
 
 ## 7. Developer Directives (Strict Execution Rules)
 
 * **Zero Hallucination:** The Sales Agent must query `cpq_pricing` via a tool call before proposing any price. If it proposes a price below `floor_price`, the system must block the message and return an internal error to the agent to rewrite it.
-* **Asynchronous Processing:** Use `asyncio` for all database reads/writes and LLM network calls to prevent Telegram webhook timeouts during the live Boardroom simulation.
+* **Asynchronous Processing:** Use `asyncio` for all database reads/writes and LLM network calls to prevent Telegram webhook timeouts during the live Boardroom negotiation.
 * **Dummy Data Initialization:** On startup, seed the SQLite database with dummy logistic pricing metrics for SwiftRoute Logistics and MegaMart India to ensure the MVP is immediately testable.

@@ -6,6 +6,10 @@ from pathlib import Path
 
 SCRATCH = Path(__file__).resolve().parent
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+import os  # noqa: E402
+# .env may hold dev settings: a test never starts real shadow matches (Gemini), and pins self-play.
+os.environ.setdefault("ZEROLEAK_SHADOW_MATCHES", "0")
+os.environ.setdefault("ZEROLEAK_SELF_PLAY", "0")
 sys.argv = ["headless_runner.py", "--matches", "1", "--delay", "0", "--out", str(SCRATCH / "bench_test")]
 import headless_runner as H  # noqa: E402
 
@@ -49,7 +53,8 @@ for arm in ("before", "after"):
     s, m = data["summary"][arm], [r for r in data["matches"] if r["arm"] == arm][0]
     checks = {"one match": s["matches"] == 1, "deal": m["deal"], "rate 42": m["rate"] == 42,
               "payment 30": m["payment_days"] == 30, "1 escalation": m["escalations"] == 1,
-              "leak counted": m["leaks"] >= 1, "lowest 42": m["arjun_lowest"] == 42}
+              "leak counted": m["leaks"] >= 1, "lowest 42": m["arjun_lowest"] == 42,
+              "floor from the rate card (1.2M -> ₹41)": m["floor"] == 41, "margin ₹1": s["avg_margin_over_floor"] == 1}
     for name, cond in checks.items():
         print(("PASS " if cond else "FAIL ") + f"{arm}: {name}")
         ok &= cond

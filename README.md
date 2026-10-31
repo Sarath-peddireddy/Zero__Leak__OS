@@ -21,37 +21,66 @@ We deploy two AI agents against each other in a live environment: **Sales** vs. 
 The system is perfectly balanced. Both sides have an AI agent doing the talking, constrained by strict database limits, while Human VPs sit behind the scenes steering the strategy.
 
 ```mermaid
-flowchart LR
-    %% Buyer Side (Left)
-    subgraph Procurement [Flipkart Procurement]
-        HumanBuyer(👤 Head of Sourcing) -.->|Strategic Whispers| ProcAgent[🤖 Procurement Agent]
-        ProcDB[(🗄️ Buyer Target DB)] ===>|Max Budget Limits| ProcAgent
+flowchart TB
+    %% Buyer column (left): database outside, human inside, agent below
+    subgraph BUY["🔴 Flipkart · Procurement (Buyer)"]
+        BDB[("🗄️ Mandate DB<br/>target · walk-away price")]
+        BH(["👤 Head of Sourcing"])
+        BA["🤖 Procurement Agent<br/>asks 🙋 when stuck"]
+        BDB ==>|"① hard limits"| BA
+        BH -.->|"② whispers · /ceiling"| BA
     end
 
-    %% The Arena (Center)
-    subgraph Arena [ZeroLeak Orchestrator]
-        ProcAgent <===>|Live Negotiation| SalesAgent
-        Guardrails{⚙️ Python Guardrails} -.->|Blocks AI Hallucinations| ProcAgent
-        Guardrails -.->|Blocks AI Hallucinations| SalesAgent
+    %% Seller column (right): the mirror image
+    subgraph SELL["🟢 Delhivery · Sales (Seller)"]
+        SH(["👤 VP of Sales"])
+        SDB[("🗄️ CPQ DB<br/>list price · floor price")]
+        SA["🤖 Sales Agent<br/>asks 🙋 when stuck"]
+        SH -.->|"② whispers · /floor"| SA
+        SDB ==>|"① hard limits"| SA
     end
 
-    %% Seller Side (Right)
-    subgraph Sales [Delhivery Sales]
-        HumanSales(👤 VP of Sales) -.->|Strategic Whispers| SalesAgent[🤖 Sales Agent]
-        SalesDB[(🗄️ Sales CPQ DB)] ===>|Floor Price Limits| SalesAgent
-    end
+    %% Shared spine (center): every message takes the same path
+    G{{"④ ⚙️ Python Guardrails<br/>price limits · RTO rule · copy check"}}
+    BR[["⑤ 💬 The Boardroom<br/>live negotiation on Telegram"]]
+    SO{{"⑥ ✍️ Executive Sign-Off Gate<br/>each VP taps ✅ before a deal or walk-away"}}
+    C(["📜 Signed contract"])
 
-    %% Custom Colors (Clear Theme)
-    style ProcAgent fill:#e74c3c,stroke:#c0392b,color:#fff,stroke-width:2px
-    style SalesAgent fill:#2ecc71,stroke:#27ae60,color:#fff,stroke-width:2px
-    style HumanBuyer fill:#f39c12,stroke:#e67e22,color:#fff
-    style HumanSales fill:#f39c12,stroke:#e67e22,color:#fff
-    style Guardrails fill:#34495e,stroke:#2c3e50,color:#fff
-    style ProcDB fill:#bdc3c7,color:#333
-    style SalesDB fill:#bdc3c7,color:#333
-    style Arena fill:#f8f9fa,stroke:#ced6e0,stroke-width:2px,stroke-dasharray: 5 5
+    BA ==>|"③ draft offer"| G
+    SA ==>|"③ draft offer"| G
+    G ==>|"only valid offers are posted"| BR
+    BR ==>|"deal or walk-away?"| SO
+    SO ==>|"both sides ✅"| C
 
+    classDef buyer fill:#ff4757,stroke:#c0392b,color:#fff,stroke-width:2px
+    classDef seller fill:#2ed573,stroke:#1e9e50,color:#fff,stroke-width:2px
+    classDef human fill:#ffd166,stroke:#e09f00,color:#3d2c00
+    classDef data fill:#57606f,stroke:#2f3542,color:#fff
+    classDef control fill:#5352ed,stroke:#3742fa,color:#fff,stroke-width:2px
+    classDef board fill:#1e90ff,stroke:#0b5ed7,color:#fff,stroke-width:2px
+    classDef gate fill:#8e44ad,stroke:#6c3483,color:#fff,stroke-width:2px
+    classDef done fill:#2f3542,stroke:#1e2229,color:#fff,stroke-width:2px
+
+    class BA buyer
+    class SA seller
+    class BH,SH human
+    class BDB,SDB data
+    class G control
+    class BR board
+    class SO gate
+    class C done
+    style BUY fill:transparent,stroke:#ff4757,stroke-width:2px,color:#ff6b81
+    style SELL fill:transparent,stroke:#2ed573,stroke-width:2px,color:#2ed573
 ```
+
+**How one negotiation flows, step by step (identical on both sides):**
+
+1. **Hard limits:** each agent loads only its own database: the seller's floor price, the buyer's walk-away price. Neither sees the other's numbers.
+2. **Whispers:** each human coaches their own agent from a private War Room, and can set a hard `/floor` or `/ceiling` for this deal.
+3. **Draft:** the agent writes its next offer. When it is stuck, it pauses and asks its human instead (🙋).
+4. **Guardrails:** Python checks every draft before the other side sees it. An offer outside the limits, or a copied instruction, is sent back for a rewrite.
+5. **Boardroom:** only valid offers are posted, and the other agent replies. Steps 3-5 repeat.
+6. **Sign-off:** neither agent can close a deal or walk away on its own. Each side's VP taps ✅ before anything is final.
 
 ### Careful AI (Governance & HITL)
 
@@ -63,6 +92,62 @@ No AI goes rogue. We built ZeroLeak OS with **"Defense in Depth"** so humans nev
 ### The Memory Pipeline (CI/CD for AI)
 
 When an AI makes a mistake, our "Judge Agent" reads the chat and writes a new rule so it never happens again. But we don't just trust the AI blindly.
+
+```mermaid
+flowchart TB
+    T[["⑦ 📄 Match ends<br/>transcript + every coaching note"]]
+
+    %% Buyer column (left): judged by the buyer's own boss
+    subgraph MB["🔴 Buyer playbook"]
+        JB{{"⚖️ Judge as<br/>Head of Sourcing"}}
+        STB[("⑧ ⏳ Staged rule<br/>not live yet")]
+        SHB["⑨ 🧪 Shadow test<br/>5 matches with vs 5 without"]
+        APB(["⑩ 👤 Head of Sourcing<br/>✅ Approve / ❌ Reject"])
+        PB[("⑪ 🧠 Buyer playbook")]
+        JB -->|"proposes a rule"| STB
+        STB --> SHB
+        SHB -->|"measured delta"| APB
+        APB -->|"✅ only"| PB
+    end
+
+    %% Seller column (right): the mirror image
+    subgraph MS["🟢 Seller playbook"]
+        JS{{"⚖️ Judge as<br/>VP of Sales"}}
+        STS[("⑧ ⏳ Staged rule<br/>not live yet")]
+        SHS["⑨ 🧪 Shadow test<br/>5 matches with vs 5 without"]
+        APS(["⑩ 👤 VP of Sales<br/>✅ Approve / ❌ Reject"])
+        PS[("⑪ 🧠 Seller playbook")]
+        JS -->|"proposes a rule"| STS
+        STS --> SHS
+        SHS -->|"measured delta"| APS
+        APS -->|"✅ only"| PS
+    end
+
+    N(["⑫ 🔁 Next match<br/>only the lessons that fit the topic load each turn"])
+
+    T --> JB
+    T --> JS
+    PB -.-> N
+    PS -.-> N
+
+    classDef judge fill:#5f27cd,stroke:#341f97,color:#fff,stroke-width:2px
+    classDef data fill:#57606f,stroke:#2f3542,color:#fff
+    classDef test fill:#5352ed,stroke:#3742fa,color:#fff,stroke-width:2px
+    classDef human fill:#ffd166,stroke:#e09f00,color:#3d2c00
+    classDef buyer fill:#ff4757,stroke:#c0392b,color:#fff,stroke-width:2px
+    classDef seller fill:#2ed573,stroke:#1e9e50,color:#fff,stroke-width:2px
+    classDef board fill:#1e90ff,stroke:#0b5ed7,color:#fff,stroke-width:2px
+
+    class T,N board
+    class JB,JS judge
+    class STB,STS data
+    class SHB,SHS test
+    class APB,APS human
+    class PB buyer
+    class PS seller
+    style MB fill:transparent,stroke:#ff4757,stroke-width:2px,color:#ff6b81
+    style MS fill:transparent,stroke:#2ed573,stroke-width:2px,color:#2ed573
+```
 
 * **Shadow Testing:** Before a new rule goes live, the system instantly plays 5 silent background matches using the new rule.
 * **Mathematical Proof:** It proves the rule makes more money, then sends a message to the Human VP: *"New tactic found. Shadow test shows it increases margin by +₹0.50. ✅ Approve."*

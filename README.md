@@ -17,6 +17,13 @@ We deploy two AI agents against each other in a live environment: **Sales** vs. 
 
 ---
 
+### 🎥 Watch: The Problem & The Architecture (7 min)
+A narrated walkthrough of the problem and the architecture behind ZeroLeak OS. Click the thumbnail to play.
+
+[![Watch the ZeroLeak OS architecture walkthrough](docs/video/zeroleak-architecture-thumb.jpg)](docs/video/zeroleak-architecture.mp4)
+
+---
+
 ### The Architecture (Symmetrical Self-Play)
 The system is perfectly balanced. Both sides have an AI agent doing the talking, constrained by strict database limits, while Human VPs sit behind the scenes steering the strategy.
 

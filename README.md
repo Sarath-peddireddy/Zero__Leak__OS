@@ -18,9 +18,9 @@ We deploy two AI agents against each other in a live environment: **Sales** vs. 
 ---
 
 ### 🎥 Watch: The Problem & The Architecture (7 min)
-A narrated walkthrough of the problem and the architecture behind ZeroLeak OS. Click the thumbnail to play.
+A narrated walkthrough of the problem and the architecture behind ZeroLeak OS.
 
-[![Watch the ZeroLeak OS architecture walkthrough](docs/video/zeroleak-architecture-thumb.jpg)](docs/video/zeroleak-architecture.mp4)
+https://github.com/user-attachments/assets/b8427268-4051-41ca-8660-314d2d41818c
 
 ---
 
